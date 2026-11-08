@@ -1,0 +1,24 @@
+# Runtime and editor output
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+venv/
+swift-cache/
+.keyword-packet-*
+# Never commit local project inputs or generated review packets
+*.fcpbundle/
+*.fcpxmld/
+*.zip
+*.mov
+*.mp4
+*.m4v
+*.wav
+*.jpg
+*.png
+.env
+.env.*
+!/.env.example
+outputs/
+private/
+local/
