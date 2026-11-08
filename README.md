@@ -2,6 +2,8 @@
 
 A small **offline, review-gated prototype**, not production-ready automation. It reuses local Whisper results, samples images with FFmpeg and Apple Vision, and prepares narrow FCPXML annotations. It never imports XML, edits native databases, uploads footage, or approves its own scene/speech proposals.
 
+**Native-import warning:** In the Final Cut Pro 12.4 synthetic test, a preparatory **Replace** import dropped an existing Reel value. The later keyword/marker round-trip preserved its baseline, but that baseline already lacked Reel. Broad metadata preservation and production replacement remain unproven. Read the [native validation report](docs/native-validation.md) before importing any candidate.
+
 ## What it does today
 
 - Converts existing local Whisper-derived transcript CSVs into proposed time-ranged Final Cut Pro markers.
@@ -95,17 +97,19 @@ python3 -m unittest discover -v
 python3 -m py_compile footage_keywords.py sample_vision.py
 ```
 
-The regression suite covers nonzero source origins, semantic deduplication, no truncation, XML encoding/entity rejection, approval reset, source/export staleness, retiming/sidecar rejection and atomic publication failures/races. Tests use synthetic data and temporary files, never personal footage.
+The 60-test suite covers nonzero source origins, semantic deduplication, no truncation, XML encoding/entity rejection, approval reset, source/export staleness, retiming/sidecar rejection and atomic publication failures/races. Tests use synthetic data and temporary files, never personal footage.
 
 The committed [synthetic test library seed](tests/fixtures/metadata-preservation/) includes a 12-second generated blue frame/test tone and FCPXML with favorite/rejected ratings, keyword ranges, regular/to-do/chapter markers, notes, roles, collections, custom metadata and an untouched timeline. It contains no real footage. Materialize an importable seed with:
 
 ```sh
-python3 -m tests.fixture_library --output /absolute/new/fixture-session
+python3 -m tests.fixture_library --seed native-baseline --output /absolute/new/fixture-session
 ```
 
-This creates path-resolved XML and unreviewed proposals, not a native `.fcpbundle`. See the [preservation test plan](docs/preservation-tests.md) for exact coverage and the separate native round-trip protocol. The optional official-DTD test skips when a legally installed DTD or `xmllint` is unavailable.
+This creates path-resolved XML and unreviewed proposals from the sanitized native baseline, not a native `.fcpbundle`. Use `--seed rich` for broader offline XML coverage. See the [preservation test plan](docs/preservation-tests.md) for exact coverage and the separate native round-trip protocol. The optional official-DTD test skips when a legally installed DTD or `xmllint` is unavailable.
 
-Automated XML tests do not prove that Final Cut Pro preserves every field after native import. Validate an exported candidate against the installed DTD and use a dedicated synthetic test library before working with real media. There is no broad format/version or native metadata-preservation guarantee.
+Six tests replay the committed sanitized native snapshots, including the observed Reel loss. A passing replay test records that limitation; it does not establish safe native preservation or launch Final Cut in CI. The final native annotation test preserved existing ratings, markers, notes and other fields present in its baseline, with no duplicate browser clips, but it did not test Reel after the earlier loss.
+
+Validate an exported candidate against the installed DTD and use a dedicated synthetic test library before working with real media. Do not treat these results as approval for production replacement. There is no broad format/version or native metadata-preservation guarantee.
 
 ## Privacy and publication
 
@@ -121,7 +125,7 @@ Original source code and original synthetic fixtures are available under the [MI
 
 These are planned directions, not implemented features or guarantees:
 
-1. **Preservation first:** reproducible synthetic test libraries and native round-trip checks for ratings, markers, keywords, roles and other existing metadata; broader FCPXML/version coverage.
+1. **Preservation first:** isolate the observed native Reel loss; expand reproducible synthetic test libraries and native round-trip checks for ratings, markers, keywords, roles and other existing metadata; broader FCPXML/version coverage.
 2. **Local transcription:** an explicit, resumable Whisper stage with model selection, timing, language/confidence signals, source fingerprints and review flags. Do not treat ASR as verified quotations or speaker identity.
 3. **Visual analysis:** scene-aware multi-frame sampling, coverage reporting, local classifier/model adapters and evidence-linked labels. Avoid claiming whole-clip coverage from a single frame.
 4. **Unified review:** combine speech and visual evidence on the same source timeline, support playback/audition and corrections, then approve only selected ranges.

@@ -11,12 +11,15 @@ from pathlib import Path
 FIXTURE = Path(__file__).parent / 'fixtures' / 'metadata-preservation'
 EVENT = 'Metadata Preservation Fixture'
 SOURCE_PLACEHOLDER = 'file:///SYNTHETIC_FIXTURE_ROOT/media/generated.mov'
+SEEDS = {'rich': 'library.fcpxml', 'native-baseline': 'native/baseline.fcpxml'}
 
 
-def seed_bytes():
+def seed_bytes(seed='rich'):
     """Resolve only the public synthetic fixture's explicit URI placeholder."""
     source = (FIXTURE / 'media' / 'generated.mov').resolve(strict=True)
-    raw = (FIXTURE / 'library.fcpxml').read_text(encoding='utf-8')
+    if seed not in SEEDS:
+        raise ValueError('unknown synthetic seed variant')
+    raw = (FIXTURE / SEEDS[seed]).read_text(encoding='utf-8')
     if raw.count(SOURCE_PLACEHOLDER) != 1:
         raise ValueError('expected exactly one synthetic source placeholder')
     # A file URI percent-encodes characters that could conflict with XML attributes.
@@ -45,15 +48,16 @@ def proposal_document():
     }
 
 
-def materialize(output):
+def materialize(output, seed='rich'):
     output = Path(output)
     # Refuse existing destinations. Never overwrite or clean up user files.
     output.mkdir(parents=False, exist_ok=False)
-    xml = seed_bytes()
+    xml = seed_bytes(seed)
     (output / 'seed.fcpxml').write_bytes(xml)
     (output / 'proposals.json').write_text(
         json.dumps(proposal_document(), indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
     manifest = json.loads((FIXTURE / 'manifest.json').read_text(encoding='utf-8'))
+    manifest['seed_variant'] = seed
     manifest['seed_sha256'] = hashlib.sha256(xml).hexdigest()
     manifest['media_sha256'] = hashlib.sha256((FIXTURE / 'media/generated.mov').read_bytes()).hexdigest()
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
@@ -63,8 +67,10 @@ def materialize(output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--seed', choices=SEEDS, default='rich',
+                        help='rich XML coverage fixture or sanitized native-compatible baseline')
     args = parser.parse_args()
-    print(materialize(args.output))
+    print(materialize(args.output, args.seed))
 
 
 if __name__ == '__main__':

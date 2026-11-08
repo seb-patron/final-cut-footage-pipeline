@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "application": "Final Cut Pro",
+  "application_version": "12.4",
+  "fcpxml_version": "1.14",
+  "metadata_view": "Extended",
+  "source_media": "generated solid-color movie and quiet test tone",
+  "source_copied": false,
+  "optimized_or_proxy_media_created": false,
+  "browser_clip_count_before": 2,
+  "browser_clip_count_after": 2,
+  "project_count_before": 1,
+  "project_count_after": 1,
+  "event_count_before": 3,
+  "event_count_after": 3,
+  "conflict_action": "Replace, only in synthetic validation library; Do not ask again remained unchecked",
+  "keyword_marker_roundtrip": "PASS against native baseline after format correction",
+  "broad_metadata_preservation": "NOT ESTABLISHED: preparatory native replacement lost an existing Reel value",
+  "preserved_in_final_roundtrip": [
+    "favorite and reject ranges/names/notes",
+    "existing keywords/ranges/notes",
+    "regular/to-do/completed/chapter markers and notes",
+    "chapter poster offset",
+    "clip note and Unicode name",
+    "source/event/project UID and media URI",
+    "source and clip start/duration",
+    "audio roles, channel layout and gains",
+    "scene and camera-angle metadata exported in baseline",
+    "resource metadata exported in baseline",
+    "analysis marker",
+    "existing collections and folders",
+    "other event and untouched timeline"
+  ],
+  "added": [
+    {
+      "kind": "keyword",
+      "value": "Added Synthetic Keyword",
+      "start": "3601s",
+      "duration": "7s"
+    },
+    {
+      "kind": "marker",
+      "value": "Added Synthetic Marker",
+      "start": "3610s",
+      "duration": "1s"
+    }
+  ],
+  "native_normalizations": [
+    "bookmark bytes regenerated",
+    "annotation sibling order changed",
+    "expected Added Synthetic Keyword collection created"
+  ],
+  "reapply_after_fresh_binding": "PASS: no new annotations and no output packet",
+  "observed_limits": [
+    "Initial seed import/Extended export omitted arbitrary custom metadata, cameraName and take fields; this is not a patch regression.",
+    "Initial seed declared Rec.709, generated source was interpreted as Rec.601; tool correctly rejected clip/resource format mismatch.",
+    "Preparatory import changed only the synthetic browser clip format to its resource format. Existing resource Reel TEST-REEL was present in imported XML but absent from the next native export.",
+    "Final keyword roundtrip therefore did not test preservation of Reel. No all-metadata preservation claim is justified.",
+    "Portable rich seed now declares matching Rec.601; that revised fresh-seed import has not been separately rerun."
+  ],
+  "native_package_publication": "NOT PUBLISHED: private path/user information found in native lock-info, event database and media symlink; native databases were not edited",
+  "sanitization": [
+    "source URI replaced with explicit synthetic placeholder",
+    "library location and media bookmark/sig removed",
+    "native-generated event/project UIDs consistently replaced with synthetic IDs",
+    "modification and ingest dates replaced with fixed year-2000 value",
+    "empty app-created event renamed"
+  ],
+  "snapshots": {
+    "initial-export.fcpxml": "ae715f06ae13125ed5188462403f5c226a58fac6b94470d2993c82a7a4b3468a",
+    "compatible-input.fcpxml": "704f81f09771c556a61c0217972d9b8c9175c801bfec6f2fe843ec3cf975cd98",
+    "baseline.fcpxml": "1399be61df8f08ccdc422de429507f2d320ff7b6fd735dc5e6bdb41783dfd533",
+    "roundtrip.fcpxml": "887a6db7f77b1795dcb77b3031d8a60155cd79b2171452fc28dccc441f427035"
+  }
+}

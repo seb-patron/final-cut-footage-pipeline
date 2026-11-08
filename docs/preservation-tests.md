@@ -2,13 +2,13 @@
 
 ## Scope and current evidence
 
-`python3 -m unittest -v` runs 54 tests. On the development Mac all 54 pass, including validation of the committed FCPXML 1.14 fixture and the resulting candidate against Final Cut Pro's installed official 1.14 DTD. On machines without Final Cut's DTD or `xmllint`, that single DTD test is skipped explicitly. Set `FCPXML_DTD` to a local, legally obtained 1.14 DTD to run it elsewhere. The DTD is not distributed with this repository.
+`python3 -m unittest -v` runs 60 tests. On the development Mac all 60 pass, including validation of the committed FCPXML 1.14 fixture and the resulting candidate against Final Cut Pro's installed official 1.14 DTD. On machines without Final Cut's DTD or `xmllint`, that single DTD test is skipped explicitly. Set `FCPXML_DTD` to a local, legally obtained 1.14 DTD to run it elsewhere. The DTD is not distributed with this repository.
 
-The new tests establish **offline XML preservation**, not native-library import safety. The principal assertion compares the entire parsed XML tree before and after removing only the additions recorded in the audit. It checks every element, attribute, text value, comment and sibling position. XML attribute order is ignored; note whitespace is not. The source XML bytes remain unchanged, and the media is read in place. The tool does not modify `.fcpbundle` databases.
+The core preservation tests establish **offline XML preservation**, not native-library import safety. Six additional tests replay sanitized native evidence, including a known metadata-loss case; they do not launch Final Cut. The principal assertion compares the entire parsed XML tree before and after removing only the additions recorded in the audit. It checks every element, attribute, text value, comment and sibling position. XML attribute order is ignored; note whitespace is not. The source XML bytes remain unchanged, and the media is read in place. The tool does not modify `.fcpbundle` databases.
 
 The portable test library is `tests/fixtures/metadata-preservation/library.fcpxml` plus its generated 64 KB media. It is a source fixture for constructing a fresh native test library, **not a native `.fcpbundle` or a backup**. The committed URI is an explicit placeholder. Use the materializer below before import. Do not import the placeholder file directly.
 
-**Native preservation roundtrip for this fixture: NOT RUN.** Do not infer native guarantees from passing unit tests or DTD validation. The initial seed can contain metadata that Final Cut omits or normalizes; seed-to-first-export differences are not patch regressions. Establish and inspect the native baseline first, then compare the post-patch export with that baseline.
+**Native keyword/marker roundtrip passed against a native baseline on Final Cut Pro 12.4; broad metadata preservation remains unproven.** A preparatory native replacement lost an existing Reel value. See the [native validation report](native-validation.md), which keeps initial import, preparatory replacement and final annotation testing separate. Do not infer native guarantees from unit tests or DTD validation.
 
 ## Coverage
 
@@ -43,10 +43,10 @@ The synthetic inline-bookmark test checks XML transport only. It does not assert
 From the repository root:
 
 ```sh
-python3 -m tests.fixture_library --output /absolute/new/fixture-session
+python3 -m tests.fixture_library --seed native-baseline --output /absolute/new/fixture-session
 ```
 
-The destination's parent must exist, and the destination must be new. The command produces `seed.fcpxml`, unreviewed `proposals.json` and a hash manifest. It references the committed generated media in place; it does not copy media, create a native library, open Final Cut, approve proposals or import XML. Keep this output outside Git: it contains paths local to your machine.
+Use `--seed rich` (the default) for the broader offline XML-coverage seed. The destination's parent must exist, and the destination must be new. The command produces `seed.fcpxml`, unreviewed `proposals.json` and a hash manifest. It references the committed generated media in place; it does not copy media, create a native library, open Final Cut, approve proposals or import XML. Keep this output outside Git: it contains paths local to your machine.
 
 Inspect the blue image and quiet tone if playing the media. The source lasts 12 seconds at 25 fps with a 01:00:00:00 timecode origin. Its content is deliberately not realistic footage or a transcript.
 

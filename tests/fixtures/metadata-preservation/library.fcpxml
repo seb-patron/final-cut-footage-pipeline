@@ -2,7 +2,7 @@
 <!DOCTYPE fcpxml>
 <fcpxml version="1.14">
   <resources>
-    <format id="r1" name="FFVideoFormat640x360p25" frameDuration="1/25s" width="640" height="360" colorSpace="1-1-1 (Rec. 709)"/>
+    <format id="r1" name="FFVideoFormat640x360p25" frameDuration="1/25s" width="640" height="360" colorSpace="6-1-6 (Rec. 601 (NTSC))"/>
     <asset id="r2" name="Generated blue and tone" uid="A3C15EB0-0000-4000-8000-000000000001" start="3600s" duration="12s" hasVideo="1" hasAudio="1" format="r1" videoSources="1" audioSources="1" audioChannels="1" audioRate="48000">
       <media-rep kind="original-media" src="file:///SYNTHETIC_FIXTURE_ROOT/media/generated.mov"/>
       <metadata>

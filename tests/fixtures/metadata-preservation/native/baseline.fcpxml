@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.14">
+    <resources>
+        <asset id="r1" name="Generated blue and tone" uid="A3C15EB0-0000-4000-8000-000000000001" start="3600s" duration="12s" hasVideo="1" format="r2" hasAudio="1" videoSources="1" audioSources="1" audioChannels="1" audioRate="48000">
+            <media-rep kind="original-media" src="file:///SYNTHETIC_FIXTURE_ROOT/media/generated.mov">
+                </media-rep>
+            <metadata>
+                <md key="com.apple.proapps.studio.rawToLogConversion" value="0" />
+                <md key="com.apple.proapps.studio.cameraISO" value="0" />
+                <md key="com.apple.proapps.studio.cameraColorTemperature" value="0" />
+                <md key="com.apple.proapps.spotlight.kMDItemCodecs">
+                    <array>
+                        <string>Lavc libx264</string>
+                        <string>MPEG-4 AAC</string>
+                    </array>
+                </md>
+                <md key="com.apple.proapps.mio.ingestDate" value="2000-01-01 00:00:00 +0000" />
+            </metadata>
+        </asset>
+        <format id="r2" frameDuration="512/12800s" width="640" height="360" colorSpace="6-1-6 (Rec. 601 (NTSC))" />
+        <format id="r3" frameDuration="1/25s" width="640" height="360" colorSpace="1-1-1 (Rec. 709)" />
+    </resources>
+    <library>
+        <event name="Empty fixture event" uid="B3C15EB0-0000-4000-8000-000000000001" />
+        <event name="Metadata Preservation Fixture" uid="B3C15EB0-0000-4000-8000-000000000002">
+            <asset-clip ref="r1" name="Generated clip — café &amp; blue" start="3600s" duration="12s" format="r2" tcFormat="NDF" modDate="2000-01-01 00:00:00 +0000" audioRole="music">
+                <note>Keep this clip note.
+Synthetic line two: café, 日本語 &amp; &lt;metadata&gt;.</note>
+                <adjust-volume amount="-6dB" />
+                <analysis-marker start="3600s" duration="12s">
+                    <shot-type value="wideShot" />
+                </analysis-marker>
+                <keyword start="3600s" duration="12s" value="Existing Full Clip" note="Whole-source keyword note" />
+                <marker start="7201/2s" duration="1/25s" value="Existing regular marker" note="Keep regular marker note &amp; symbols" />
+                <keyword start="3601s" duration="3s" value="Existing Blue, Existing Tone" note="Comma-separated keyword note" />
+                <rating name="Favorite portion" start="3601s" duration="2s" value="favorite" note="Keep favorite note" />
+                <marker start="3604s" duration="1/25s" value="Existing to-do" completed="0" note="Pending marker note" />
+                <marker start="3605s" duration="1/25s" value="Existing completed to-do" completed="1" note="Completed marker note" />
+                <rating name="Rejected portion" start="3606s" duration="2s" value="reject" note="Keep reject note" />
+                <chapter-marker start="3609s" duration="1/25s" value="Existing chapter" note="Chapter note" posterOffset="1/5s" />
+                <audio-channel-source srcCh="1" outCh="L, R" role="music.synthetic">
+                    <adjust-volume amount="-3dB" />
+                </audio-channel-source>
+                <metadata>
+                    <md key="com.apple.proapps.studio.scene" value="Synthetic scene" />
+                    <md key="com.apple.proapps.studio.angle" value="Fixture angle" />
+                </metadata>
+            </asset-clip>
+            <project name="Untouched synthetic timeline" uid="B3C15EB0-0000-4000-8000-000000000003" modDate="2000-01-01 00:00:00 +0000">
+                <sequence format="r3" duration="4s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+                    <spine>
+                        <asset-clip ref="r1" offset="0s" name="Timeline instance stays unchanged" start="3602s" duration="4s" tcFormat="NDF" audioRole="music">
+                            <note>Unrelated timeline note</note>
+                            <marker start="3603s" duration="1/25s" value="Timeline-only marker" note="Do not edit this timeline" />
+                        </asset-clip>
+                    </spine>
+                </sequence>
+            </project>
+            <keyword-collection name="Existing Full Clip" />
+            <collection-folder name="Existing collections">
+                <keyword-collection name="Existing Blue" />
+                <smart-collection name="Existing favorites" match="all">
+                    <match-ratings value="favorites" />
+                </smart-collection>
+            </collection-folder>
+            <keyword-collection name="Existing Tone" />
+        </event>
+        <event name="Untouched Event" uid="B3C15EB0-0000-4000-8000-000000000004">
+            <asset-clip ref="r1" name="Other event instance" start="3600s" duration="12s" format="r2" tcFormat="NDF" modDate="2000-01-01 00:00:00 +0000" audioRole="dialogue">
+                <note>Other event note</note>
+                <rating start="0s" value="favorite" note="Implicit whole-clip rating" />
+            </asset-clip>
+        </event>
+        <smart-collection name="Projects" match="all">
+            <match-clip rule="is" type="project" />
+        </smart-collection>
+        <smart-collection name="All Video" match="any">
+            <match-media rule="is" type="videoOnly" />
+            <match-media rule="is" type="videoWithAudio" />
+        </smart-collection>
+        <smart-collection name="Audio Only" match="all">
+            <match-media rule="is" type="audioOnly" />
+        </smart-collection>
+        <smart-collection name="Stills" match="all">
+            <match-media rule="is" type="stills" />
+        </smart-collection>
+        <smart-collection name="Favorites" match="all">
+            <match-ratings value="favorites" />
+        </smart-collection>
+        <smart-collection name="Missing Analysis" match="all">
+            <match-analysis-type rule="isMissing" value="any" />
+        </smart-collection>
+        <smart-collection name="Library favorites" match="all">
+            <match-ratings value="favorites" />
+        </smart-collection>
+    </library>
+</fcpxml>
