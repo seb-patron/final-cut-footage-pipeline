@@ -1,6 +1,15 @@
-# Footage Keywords
+# Final Cut Footage Pipeline
 
 A small **offline, review-gated prototype**, not production-ready automation. It reuses local Whisper results, samples images with FFmpeg and Apple Vision, and prepares narrow FCPXML annotations. It never imports XML, edits native databases, uploads footage, or approves its own scene/speech proposals.
+
+## What it does today
+
+- Converts existing local Whisper-derived transcript CSVs into proposed time-ranged Final Cut Pro markers.
+- Samples one requested frame with FFmpeg and Apple Vision to suggest visual keywords.
+- Combines those suggestions, binds them to an exact FCPXML export and local source bytes, and prepares a review packet containing candidate FCPXML plus an audit.
+- Requires explicit human review and approval before it includes an annotation. It never imports that packet into Final Cut Pro.
+
+This is more than keywording, but it is not yet an end-to-end transcription or visual-analysis system. It does not currently run Whisper, analyze complete clips, identify speakers or locations, or provide a review UI. The command names remain `footage_keywords.py` and `sample_vision.py` for now.
 
 ## Requirements and setup
 
@@ -9,8 +18,8 @@ Python 3.10+ (standard library only), macOS with Swift/Apple Vision, and FFmpeg.
 Clone the public repository, then run commands from its root:
 
 ```sh
-git clone https://github.com/seb-patron/footage-keywords.git
-cd footage-keywords
+git clone https://github.com/seb-patron/final-cut-footage-pipeline.git
+cd final-cut-footage-pipeline
 python3 footage_keywords.py --help
 python3 -m unittest discover -v
 ```
@@ -100,8 +109,16 @@ The CLI makes no network requests. FFmpeg and Apple Vision are invoked locally. 
 
 Original source code and original synthetic fixtures are available under the [MIT License](LICENSE). External tools and Apple frameworks retain their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Final Cut Pro, Apple Vision, FFmpeg, Whisper, models and Apple DTDs are not bundled.
 
-## Remaining work
+## Roadmap: local analysis through reviewed Final Cut metadata
 
-Independent review of hardening; live-library freshness checks; bundled sidecar support; range playback/audition UI; batch sampling with coverage metrics; broader preservation tests for preexisting metadata and complex native clip types; broader native version coverage. The pipeline is useful for proposals today, but not a one-click bulk production labeler.
+These are planned directions, not implemented features or guarantees:
+
+1. **Preservation first:** reproducible synthetic test libraries and native round-trip checks for ratings, markers, keywords, roles and other existing metadata; broader FCPXML/version coverage.
+2. **Local transcription:** an explicit, resumable Whisper stage with model selection, timing, language/confidence signals, source fingerprints and review flags. Do not treat ASR as verified quotations or speaker identity.
+3. **Visual analysis:** scene-aware multi-frame sampling, coverage reporting, local classifier/model adapters and evidence-linked labels. Avoid claiming whole-clip coverage from a single frame.
+4. **Unified review:** combine speech and visual evidence on the same source timeline, support playback/audition and corrections, then approve only selected ranges.
+5. **Safer Final Cut handoff:** clearer dry-run diffs, native-library freshness checks and more supported export structures. Any future import workflow must preserve explicit authorization and metadata checks.
+
+The goal is a complete local footage-understanding and Final Cut metadata pipeline, built incrementally on the current proposal/review layer. Bundled sidecars, complex native clip types and production-scale batch processing remain unsupported or unvalidated.
 
 Apple references: [XML workflow](https://support.apple.com/en-az/guide/final-cut-pro/verdbd66ae/mac), [FCPXML creation](https://developer.apple.com/documentation/professional-video-applications/creating-fcpxml-documents), [DTD caveats](https://developer.apple.com/documentation/professional-video-applications/document-type-definition).
