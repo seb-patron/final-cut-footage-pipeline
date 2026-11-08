@@ -22,3 +22,6 @@ swift-cache/
 outputs/
 private/
 local/
+
+# One audited, original synthetic test movie only
+!/tests/fixtures/metadata-preservation/media/generated.mov

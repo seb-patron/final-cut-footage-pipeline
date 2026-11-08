@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Metadata Preservation Fixture",
+  "version": "1.14",
+  "source": "media/generated.mov",
+  "source_origin_seconds": "3600",
+  "source_duration_seconds": "12",
+  "frame_rate": "25",
+  "provenance": "Generated from a solid blue frame and a quiet 440 Hz sine wave. No captured footage, third-party artwork, speech, personal metadata or production-library data.",
+  "native_status": "NOT RUN",
+  "portable_format": "FCPXML seed with explicit placeholder URI; materialize before import",
+  "reference_uri": "file:///SYNTHETIC_FIXTURE_ROOT/media/generated.mov",
+  "source_sha256": "404fb6ddb91878fb5da3cad35105cfdc2c9ffd09d7e289718d34c2d659f5b4fc"
+}

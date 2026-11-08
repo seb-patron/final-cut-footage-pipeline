@@ -91,11 +91,19 @@ xmllint --noout --dtdvalid 'file:///Applications/Final%20Cut%20Pro.app/Contents/
 ## Tests
 
 ```sh
-python3 -m unittest -v
+python3 -m unittest discover -v
 python3 -m py_compile footage_keywords.py sample_vision.py
 ```
 
 The regression suite covers nonzero source origins, semantic deduplication, no truncation, XML encoding/entity rejection, approval reset, source/export staleness, retiming/sidecar rejection and atomic publication failures/races. Tests use synthetic data and temporary files, never personal footage.
+
+The committed [synthetic test library seed](tests/fixtures/metadata-preservation/) includes a 12-second generated blue frame/test tone and FCPXML with favorite/rejected ratings, keyword ranges, regular/to-do/chapter markers, notes, roles, collections, custom metadata and an untouched timeline. It contains no real footage. Materialize an importable seed with:
+
+```sh
+python3 -m tests.fixture_library --output /absolute/new/fixture-session
+```
+
+This creates path-resolved XML and unreviewed proposals, not a native `.fcpbundle`. See the [preservation test plan](docs/preservation-tests.md) for exact coverage and the separate native round-trip protocol. The optional official-DTD test skips when a legally installed DTD or `xmllint` is unavailable.
 
 Automated XML tests do not prove that Final Cut Pro preserves every field after native import. Validate an exported candidate against the installed DTD and use a dedicated synthetic test library before working with real media. There is no broad format/version or native metadata-preservation guarantee.
 

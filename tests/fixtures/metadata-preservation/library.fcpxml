@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" name="FFVideoFormat640x360p25" frameDuration="1/25s" width="640" height="360" colorSpace="1-1-1 (Rec. 709)"/>
+    <asset id="r2" name="Generated blue and tone" uid="A3C15EB0-0000-4000-8000-000000000001" start="3600s" duration="12s" hasVideo="1" hasAudio="1" format="r1" videoSources="1" audioSources="1" audioChannels="1" audioRate="48000">
+      <media-rep kind="original-media" src="file:///SYNTHETIC_FIXTURE_ROOT/media/generated.mov"/>
+      <metadata>
+        <md key="com.apple.proapps.studio.cameraName" value="Synthetic camera"/>
+        <md key="com.apple.proapps.studio.reel" value="TEST-REEL"/>
+        <md key="org.footage-keywords.fixture.resource" value="Generated source, no personal footage" type="string" editable="1"/>
+      </metadata>
+    </asset>
+  </resources>
+  <library colorProcessing="standard">
+    <event name="Metadata Preservation Fixture" uid="B3C15EB0-0000-4000-8000-000000000001">
+      <asset-clip name="Generated clip — café &amp; blue" ref="r2" format="r1" start="3600s" duration="12s" tcFormat="NDF" audioRole="music.synthetic" videoRole="video" enabled="1">
+        <note>Keep this clip note.
+Synthetic line two: café, 日本語 &amp; &lt;metadata&gt;.</note>
+        <adjust-volume amount="-6dB"/>
+        <!-- Existing comment is intentional preservation coverage. -->
+        <keyword start="3600s" duration="12s" value="Existing Full Clip" note="Whole-source keyword note"/>
+        <keyword start="3601s" duration="3s" value="Existing Blue, Existing Tone" note="Comma-separated keyword note"/>
+        <rating name="Favorite portion" start="3601s" duration="2s" value="favorite" note="Keep favorite note"/>
+        <rating name="Rejected portion" start="3606s" duration="2s" value="reject" note="Keep reject note"/>
+        <marker start="7201/2s" duration="1/25s" value="Existing regular marker" note="Keep regular marker note &amp; symbols"/>
+        <marker start="3604s" duration="1/25s" value="Existing to-do" completed="0" note="Pending marker note"/>
+        <marker start="3605s" duration="1/25s" value="Existing completed to-do" completed="1" note="Completed marker note"/>
+        <chapter-marker start="3609s" duration="1/25s" value="Existing chapter" note="Chapter note" posterOffset="1/5s"/>
+        <analysis-marker start="3600s" duration="12s"><shot-type value="wideShot"/></analysis-marker>
+        <audio-channel-source srcCh="1" outCh="L,R" role="music.synthetic" enabled="1"><adjust-volume amount="-3dB"/></audio-channel-source>
+        <metadata>
+          <md key="com.apple.proapps.studio.scene" value="Synthetic scene"/>
+          <md key="com.apple.proapps.studio.take" value="7"/>
+          <md key="com.apple.proapps.studio.angle" value="Fixture angle"/>
+          <md key="org.footage-keywords.fixture.string" value="Keep &amp; preserve &quot;quotes&quot;" type="string" editable="1" displayName="Fixture note" description="Synthetic metadata" source="fixture"/>
+          <md key="org.footage-keywords.fixture.array"><array><string>first</string><string>日本語</string></array></md>
+          <md key="org.footage-keywords.fixture.boolean" value="1" type="boolean"/>
+          <md key="org.footage-keywords.fixture.integer" value="42" type="integer"/>
+          <md key="org.footage-keywords.fixture.float" value="3.25" type="float"/>
+          <md key="org.footage-keywords.fixture.date" value="2000-01-01T00:00:00Z" type="date"/>
+        </metadata>
+      </asset-clip>
+      <keyword-collection name="Existing Full Clip"/>
+      <collection-folder name="Existing collections">
+        <keyword-collection name="Existing Blue"/>
+        <smart-collection name="Existing favorites" match="all"><match-ratings value="favorites"/></smart-collection>
+      </collection-folder>
+      <project name="Untouched synthetic timeline" uid="C3C15EB0-0000-4000-8000-000000000001">
+        <sequence format="r1" duration="4s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine><asset-clip name="Timeline instance stays unchanged" ref="r2" offset="0s" start="3602s" duration="4s" audioRole="music.synthetic"><note>Unrelated timeline note</note><marker start="3603s" duration="1/25s" value="Timeline-only marker" note="Do not edit this timeline"/></asset-clip></spine>
+        </sequence>
+      </project>
+    </event>
+    <event name="Untouched Event" uid="B3C15EB0-0000-4000-8000-000000000002">
+      <asset-clip name="Other event instance" ref="r2" start="3600s" duration="12s"><note>Other event note</note><rating value="favorite" note="Implicit whole-clip rating"/></asset-clip>
+    </event>
+    <smart-collection name="Library favorites" match="all"><match-ratings value="favorites"/></smart-collection>
+  </library>
+</fcpxml>
