@@ -26,9 +26,11 @@ from unittest import mock
 from fcp_pipeline.bridge import check as check_module
 from fcp_pipeline.bridge.check import (
     CANNOT_VERIFY,
+    REFUSED,
     VALID,
     CheckResult,
 )
+from fcp_pipeline.bridge import watch as watch_module
 from fcp_pipeline.bridge.watch import WatchResult, main, watch_export
 
 DOCUMENT = """<?xml version="1.0" encoding="UTF-8"?>
@@ -438,6 +440,176 @@ class TestWatch(unittest.TestCase):
                     with self.subTest("symlink-candidate"):
                         self.skipTest("symlinks unavailable: %s"
                                       % symlink_reason)
+
+    def test_symlink_swap_just_before_check_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with tempfile.TemporaryDirectory() as outer:
+                inside = DOCUMENT.encode("utf-8")
+                outside_text = DOCUMENT.replace(
+                    "Invented Event", "Outside Sentinel XYZ123")
+                self.assertNotIn("Outside Sentinel", DOCUMENT)
+                outside = os.path.join(outer, "outside.fcpxml")
+                Path(outside).write_bytes(outside_text.encode("utf-8"))
+                outside_hash = hashlib.sha256(
+                    outside_text.encode("utf-8")).hexdigest()
+                target = os.path.join(tmp, "new.fcpxml")
+                fake = FakeClock()
+                fake.steps.append(
+                    lambda: Path(target).write_bytes(inside))
+                fake.steps.extend([lambda: None] * 8)
+                original_sig = watch_module._signature
+                swapped = {"done": False}
+
+                def swapping_sig(full, kind):
+                    sig = original_sig(full, kind)
+                    if (not swapped["done"] and full == target
+                            and sig is not None
+                            and sig is not watch_module._ABSENT
+                            and fake.now >= 1.5):
+                        try:
+                            os.remove(full)
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            os.symlink(outside, full)
+                        swapped["done"] = True
+                    return sig
+
+                with mock.patch.dict(
+                        os.environ,
+                        {"FCP_DTD_DIR": _missing_dtd(tmp)}):
+                    with mock.patch.object(
+                            watch_module, "_signature",
+                            side_effect=swapping_sig):
+                        results = watch_export(
+                            tmp, timeout=30, interval=0.5, settle=1.0,
+                            clock=fake.clock, sleep=fake.sleep)
+                self.assertTrue(swapped["done"], "swap never ran")
+                self.assertEqual(len(results), 1)
+                result = results[0]
+                self.assertEqual(result.path, target)
+                self.assertEqual(result.check.status, REFUSED)
+                # The outside file is never read: its hash is never
+                # reported and its sentinel never appears.
+                self.assertIsNone(result.sha256)
+                self.assertIsNone(result.check.sha256)
+                self.assertNotEqual(result.sha256, outside_hash)
+                blob = (repr(result.check.problems)
+                        + repr(result.check.status)
+                        + str(result.sha256))
+                self.assertNotIn("Outside Sentinel", blob)
+
+        with self.subTest("bundle-info-symlink"):
+            with tempfile.TemporaryDirectory() as tmp:
+                with tempfile.TemporaryDirectory() as outer:
+                    inside = DOCUMENT.encode("utf-8")
+                    outside_text = DOCUMENT.replace(
+                        "Invented Event", "Outside Bundle Sentinel QRS987")
+                    self.assertNotIn("Outside Bundle Sentinel", DOCUMENT)
+                    outside = os.path.join(outer, "outside.fcpxml")
+                    Path(outside).write_bytes(
+                        outside_text.encode("utf-8"))
+                    outside_hash = hashlib.sha256(
+                        outside_text.encode("utf-8")).hexdigest()
+                    bundle = os.path.join(tmp, "new.fcpxmld")
+                    info_path = os.path.join(bundle, "Info.fcpxml")
+
+                    def make_bundle():
+                        os.mkdir(bundle)
+                        Path(info_path).write_bytes(inside)
+
+                    fake = FakeClock()
+                    fake.steps.append(make_bundle)
+                    fake.steps.extend([lambda: None] * 10)
+                    original_sig = watch_module._signature
+                    swapped = {"done": False}
+
+                    def swapping_bundle_sig(full, kind):
+                        import shutil
+                        sig = original_sig(full, kind)
+                        if (not swapped["done"] and full == bundle
+                                and sig is not None
+                                and sig is not watch_module._ABSENT
+                                and fake.now >= 1.5):
+                            if not os.path.islink(full):
+                                shutil.rmtree(full, ignore_errors=True)
+                                try:
+                                    os.symlink(outside, full)
+                                except FileExistsError:
+                                    pass
+                            swapped["done"] = True
+                        return sig
+
+                    with mock.patch.dict(
+                            os.environ,
+                            {"FCP_DTD_DIR": _missing_dtd(tmp)}):
+                        with mock.patch.object(
+                                watch_module, "_signature",
+                                side_effect=swapping_bundle_sig):
+                            results = watch_export(
+                                tmp, timeout=30, interval=0.5, settle=1.0,
+                                clock=fake.clock, sleep=fake.sleep)
+                    self.assertTrue(swapped["done"], "bundle swap never ran")
+                    self.assertEqual(len(results), 1)
+                    result = results[0]
+                    self.assertEqual(result.path, bundle)
+                    self.assertEqual(result.check.status, REFUSED)
+                    self.assertIsNone(result.sha256)
+                    self.assertIsNone(result.check.sha256)
+                    self.assertNotEqual(result.sha256, outside_hash)
+                    blob = (repr(result.check.problems)
+                            + repr(result.check.status)
+                            + str(result.sha256))
+                    self.assertNotIn("Outside Bundle Sentinel", blob)
+
+    def test_watcher_creates_no_new_files_in_watched_folder(self):
+        self.assertTrue(sys.dont_write_bytecode,
+                        "watch sets sys.dont_write_bytecode on import")
+        with tempfile.TemporaryDirectory() as tmp:
+            before = _snapshot(tmp)
+            data = DOCUMENT.encode("utf-8")
+            target = os.path.join(tmp, "new.fcpxml")
+            fake = FakeClock()
+            fake.steps.append(lambda: Path(target).write_bytes(data))
+            with mock.patch.dict(os.environ,
+                                 {"FCP_DTD_DIR": _missing_dtd(tmp)}):
+                results = watch_export(
+                    tmp, timeout=30, interval=0.5, settle=1.0,
+                    clock=fake.clock, sleep=fake.sleep)
+            self.assertEqual(len(results), 1)
+            after = _snapshot(tmp)
+            new_keys = set(after.keys()) - set(before.keys())
+            self.assertEqual(new_keys, {"new.fcpxml"})
+            for key in after:
+                self.assertFalse(key.endswith(".pyc"), key)
+                self.assertNotIn("__pycache__", key)
+
+        with self.subTest("bundle"):
+            with tempfile.TemporaryDirectory() as tmp:
+                before = _snapshot(tmp)
+                data = DOCUMENT.encode("utf-8")
+                bundle = os.path.join(tmp, "new.fcpxmld")
+                info_path = os.path.join(bundle, "Info.fcpxml")
+
+                def make_bundle():
+                    os.mkdir(bundle)
+                    Path(info_path).write_bytes(data)
+
+                fake = FakeClock()
+                fake.steps.append(make_bundle)
+                with mock.patch.dict(
+                        os.environ, {"FCP_DTD_DIR": _missing_dtd(tmp)}):
+                    results = watch_export(
+                        tmp, timeout=30, interval=0.5, settle=1.0,
+                        clock=fake.clock, sleep=fake.sleep)
+                self.assertEqual(len(results), 1)
+                after = _snapshot(tmp)
+                new_keys = set(after.keys()) - set(before.keys())
+                self.assertEqual(
+                    new_keys, {"new.fcpxmld", "new.fcpxmld/Info.fcpxml"})
+                for key in after:
+                    self.assertFalse(key.endswith(".pyc"), key)
+                    self.assertNotIn("__pycache__", key)
 
     def test_timeout_returns_nothing(self):
         with tempfile.TemporaryDirectory() as parent:

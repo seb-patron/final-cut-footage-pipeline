@@ -114,13 +114,22 @@ prints one line saying so and exits 3. A missing folder option, a
 folder that does not exist or is not a folder, or a bad number is a
 usage error with exit code 2.
 
-## What the watcher never does
+## What the watcher writes (and never does)
 
-It only looks. It never writes into the watched folder or anywhere
-else, never imports anything, never opens, launches or scripts Final
-Cut Pro or Motion, and uses no network. It reads the watched folder's
-top-level listing to spot new names, reads the new file's bytes through
-the offline check, and otherwise only prints to the screen.
+It only looks inside the watched folder: it never creates, modifies,
+renames or deletes any file or folder there, and no new files appear
+there while it runs. Outside the watched folder it writes nothing
+except Python bytecode caches (`__pycache__/*.pyc`) — in particular
+nothing under `.pipeline/` either — and even those go away when run
+with `python3 -B` or `PYTHONDONTWRITEBYTECODE=1` (the command also sets
+`sys.dont_write_bytecode` before importing package modules). It never
+opens, launches or scripts Final Cut Pro or Motion, and uses no network.
+It reads the watched folder's top-level listing to spot new names, opens
+each new `.fcpxml` file (or bundle's `Info.fcpxml`) with `O_NOFOLLOW`
+(and `O_NONBLOCK`, then `fstat` `S_ISREG`) relative to a directory fd for
+the watched folder, validates exactly those bytes through the offline
+check without re-opening the candidate path, and otherwise only prints
+to the screen.
 
 A `bridge watch` step of the pipeline command, which will run this
 watcher for you, comes later.

@@ -4,16 +4,30 @@
 folder the editor exports XML into, waits for a new ``.fcpxml`` file or
 ``.fcpxmld`` bundle to appear and stop changing (for a bundle, until its
 ``Info.fcpxml`` exists and the bundle has stopped changing), runs the
-offline check from :mod:`fcp_pipeline.bridge.check` on it, and prints
-its path, its SHA-256 fingerprint, and the check's verdict.
+offline check from :mod:`fcp_pipeline.bridge.check` on exactly the bytes
+read through a no-follow open, and prints its path, its SHA-256
+fingerprint, and the check's verdict.
 
 Exports already in the folder when watching starts are ignored for the
-whole run. The watcher only reads: it never creates, changes, renames
-or deletes any file or folder, never imports anything, never contacts,
-launches or scripts Final Cut Pro or Motion, and uses no network.
+whole run. Inside the watched folder the watcher only reads: it never
+creates, changes, renames or deletes any file or folder there, and it
+never writes any file outside Python bytecode caches
+(``__pycache__/*.pyc``), suppressed with ``python3 -B``,
+``PYTHONDONTWRITEBYTECODE=1`` or the ``sys.dont_write_bytecode`` flag set
+below. It never contacts, launches or scripts Final Cut Pro or Motion,
+and uses no network.
 """
 
+import sys
+
+# Suppress bytecode writes for the package imports below. This must run
+# before importing any fcp_pipeline modules. Running the command with
+# ``python3 -B`` or ``PYTHONDONTWRITEBYTECODE=1`` suppresses even this
+# module's own cache entry as well.
+sys.dont_write_bytecode = True
+
 import argparse
+import errno
 import os
 import stat
 import time
@@ -24,13 +38,150 @@ from fcp_pipeline.bridge.check import (
     REFUSED,
     VALID,
     CheckResult,
+    Problem,
     check_fcpxml,
 )
+
+import fcp_pipeline.bridge.check as _check_module
 
 _FILE_SUFFIX = ".fcpxml"
 _BUNDLE_SUFFIX = ".fcpxmld"
 
 _ABSENT = object()
+
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+class _Refused(Exception):
+    """A candidate cannot be opened safely as a regular file."""
+
+
+def _read_fd_all(fd):
+    """Read every byte from an open fd."""
+    chunks = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _read_candidate_bytes(folder, name, kind):
+    """Return exactly the bytes of a stable candidate, no-follow.
+
+    The candidate is opened with ``O_NOFOLLOW`` (and ``O_NONBLOCK``, then
+    ``fstat`` ``S_ISREG``) relative to a directory fd for the watched
+    folder, so a symlink swapped in after the stability check is refused
+    instead of followed outside the folder. A bundle's ``Info.fcpxml``
+    is opened the same way relative to the bundle directory fd.
+    Raises ``_Refused`` for a symlink or non-regular file and
+    ``FileNotFoundError`` when the candidate vanished.
+    """
+    if (not name or name in (".", "..") or "/" in name
+            or "\x00" in name or name.startswith(".")):
+        raise _Refused("refused %s: not a candidate" % (name,))
+    try:
+        dir_fd = os.open(folder, os.O_RDONLY | _O_DIRECTORY)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            raise FileNotFoundError(str(exc)) from exc
+        raise _Refused("cannot open watched folder: %s" % (exc,)) from exc
+    try:
+        if kind == "file":
+            try:
+                fd = os.open(
+                    name,
+                    os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,
+                    dir_fd=dir_fd,
+                )
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    raise FileNotFoundError(str(exc)) from exc
+                raise _Refused(
+                    "refused %s: %s" % (name, exc.strerror or exc)
+                ) from exc
+            try:
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise _Refused(
+                        "refused %s: not a regular file" % (name,))
+                return _read_fd_all(fd)
+            finally:
+                os.close(fd)
+        elif kind == "bundle":
+            try:
+                bundle_fd = os.open(
+                    name,
+                    os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW,
+                    dir_fd=dir_fd,
+                )
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    raise FileNotFoundError(str(exc)) from exc
+                raise _Refused(
+                    "refused %s: %s" % (name, exc.strerror or exc)
+                ) from exc
+            try:
+                bundle_stat = os.fstat(bundle_fd)
+                if not stat.S_ISDIR(bundle_stat.st_mode):
+                    raise _Refused(
+                        "refused %s: not a directory" % (name,))
+                try:
+                    fd = os.open(
+                        "Info.fcpxml",
+                        os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,
+                        dir_fd=bundle_fd,
+                    )
+                except OSError as exc:
+                    if exc.errno == errno.ENOENT:
+                        raise FileNotFoundError(str(exc)) from exc
+                    raise _Refused(
+                        "refused %s/Info.fcpxml: %s"
+                        % (name, exc.strerror or exc)
+                    ) from exc
+                try:
+                    opened = os.fstat(fd)
+                    if not stat.S_ISREG(opened.st_mode):
+                        raise _Refused(
+                            "refused %s/Info.fcpxml: not a regular file"
+                            % (name,))
+                    return _read_fd_all(fd)
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(bundle_fd)
+        else:
+            raise _Refused("refused %s: unknown kind" % (name,))
+    finally:
+        os.close(dir_fd)
+
+
+def _validate_secure_bytes(raw, display_path):
+    """Validate exactly ``raw`` bytes through the offline check.
+
+    Small adapter: the checker's file reader is pointed at the already
+    opened bytes, so :func:`check_fcpxml` validates those bytes without
+    re-opening the candidate path (which may now be a symlink outside
+    the watched folder).
+    """
+    original = _check_module.xml_bytes
+    _check_module.xml_bytes = lambda _target: raw
+    try:
+        return check_fcpxml(display_path)
+    finally:
+        _check_module.xml_bytes = original
+
+
+def _refused_result(display_path, message):
+    """Return a refused CheckResult that carries no file bytes."""
+    return CheckResult(
+        path=display_path, status=REFUSED, ok=False, sha256=None,
+        version=None, dtd=None,
+        problems=[Problem(message=message)],
+    )
 
 
 @dataclass
@@ -149,12 +300,19 @@ def watch_export(folder, *, timeout=600.0, interval=1.0, settle=2.0,
     name order; a candidate whose signature changed during its check is
     dropped and starts over. Returns the standing results in name order,
     or [] when the deadline (start plus ``timeout``) is reached first.
+
+    The default check opens each candidate with ``O_NOFOLLOW`` (and
+    ``O_NONBLOCK``, then ``fstat`` ``S_ISREG``) relative to a directory
+    fd for the watched folder and validates exactly those bytes, never
+    re-opening the candidate path. A custom ``check`` callable (a test
+    hook taking the candidate path) re-opens the path as before.
     """
     if clock is None:
         clock = time.monotonic
     if sleep is None:
         sleep = time.sleep
-    if check is None:
+    secure = check is None
+    if secure:
         check = check_fcpxml
     start = clock()
     deadline = start + timeout
@@ -194,17 +352,61 @@ def watch_export(folder, *, timeout=600.0, interval=1.0, settle=2.0,
             complete.sort(key=lambda item: item[0])
             results = []
             for name, kind, full, signature in complete:
-                outcome = check(full)
-                again = _signature(full, kind)
-                if again is _ABSENT:
-                    tracked.pop(name, None)
-                    continue
-                if again != signature:
-                    tracked[name] = (again, now)
-                    continue
-                results.append(WatchResult(path=full,
-                                           sha256=outcome.sha256,
-                                           check=outcome))
+                if secure:
+                    try:
+                        raw = _read_candidate_bytes(folder, name, kind)
+                    except FileNotFoundError:
+                        tracked.pop(name, None)
+                        continue
+                    except _Refused as exc:
+                        outcome = _refused_result(full, str(exc))
+                        results.append(WatchResult(
+                            path=full, sha256=None, check=outcome))
+                        continue
+                    outcome = _validate_secure_bytes(raw, full)
+                    again = _signature(full, kind)
+                    if again is _ABSENT:
+                        try:
+                            current = os.lstat(full)
+                        except OSError:
+                            tracked.pop(name, None)
+                            continue
+                        if kind == "file" and not stat.S_ISREG(
+                                current.st_mode):
+                            outcome = _refused_result(
+                                full,
+                                "refused %s: not a regular file" % (name,))
+                            results.append(WatchResult(
+                                path=full, sha256=None, check=outcome))
+                            continue
+                        if kind == "bundle" and not stat.S_ISDIR(
+                                current.st_mode):
+                            outcome = _refused_result(
+                                full,
+                                "refused %s: not a directory" % (name,))
+                            results.append(WatchResult(
+                                path=full, sha256=None, check=outcome))
+                            continue
+                        tracked.pop(name, None)
+                        continue
+                    if again != signature:
+                        tracked[name] = (again, now)
+                        continue
+                    results.append(WatchResult(path=full,
+                                               sha256=outcome.sha256,
+                                               check=outcome))
+                else:
+                    outcome = check(full)
+                    again = _signature(full, kind)
+                    if again is _ABSENT:
+                        tracked.pop(name, None)
+                        continue
+                    if again != signature:
+                        tracked[name] = (again, now)
+                        continue
+                    results.append(WatchResult(path=full,
+                                               sha256=outcome.sha256,
+                                               check=outcome))
             if results:
                 return results
         if now >= deadline:
@@ -254,9 +456,10 @@ def main(argv=None, *, clock=None, sleep=None):
         prog="fcp_pipeline.bridge.watch",
         description="Watch one folder for a new exported .fcpxml file or "
         ".fcpxmld bundle, wait until it stops changing, run the offline "
-        "check on it, and print its path, SHA-256 and the check's "
-        "verdict. Files already in the folder are ignored. Reads only; "
-        "writes nothing.",
+        "check on exactly the no-follow bytes and print its path, SHA-256 "
+        "and the check's verdict. Files already in the folder are "
+        "ignored. Inside the folder it only reads; outside it writes at "
+        "most Python bytecode caches unless -B is used.",
     )
     parser.add_argument(
         "--folder", required=True,
