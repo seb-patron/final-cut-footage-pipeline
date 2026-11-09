@@ -1,0 +1,3 @@
+{"custom_id": "clip-2", "id": "resp-invented-002", "response": {"status_code": 400, "request_id": "req-invented-002", "body": null}, "error": {"code": "invalid_request", "message": "invented provider message that must never surface"}}
+{"custom_id": "clip-3", "id": "resp-invented-003", "response": {"status_code": 500, "request_id": "req-invented-003", "body": null}, "error": {"code": "expired", "message": "invented provider message that must never surface"}}
+{"custom_id": "clip-4", "id": "resp-invented-004", "response": {"status_code": 500, "request_id": "req-invented-004", "body": null}, "error": {"code": "canceled", "message": "invented provider message that must never surface"}}

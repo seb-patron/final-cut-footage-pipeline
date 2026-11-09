@@ -1068,7 +1068,34 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Refuse every network call before anything is sent.",
     )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help=(
+            "Submit every tag-eligible clip's contact sheet as "
+            "provider batch jobs, then return."
+        ),
+    )
+    parser.add_argument(
+        "--collect",
+        action="store_true",
+        help=(
+            "Fetch finished batch job results and store them as tags."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.batch and args.collect:
+        print(
+            "error: --batch and --collect cannot be used together",
+            file=sys.stderr,
+        )
+        return 2
+    if args.collect and args.dry_run:
+        print(
+            "error: --dry-run cannot be used with --collect",
+            file=sys.stderr,
+        )
+        return 2
     if args.offline:
         set_offline(True)
     try:
@@ -1093,6 +1120,53 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if args.batch or args.collect:
+        from fcp_pipeline import tag_batch as tag_batch_module
+
+        try:
+            result = tag_batch_module.run(args, settings, catalog, extra)
+        except OfflineError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 3
+        except ai.AiConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except TagError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except tag_batch_module.TagBatchError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except (catalog_module.CatalogError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            catalog.close()
+        for entry in result.entries:
+            if entry.status in ("failed", "stale", "no-sheet", "expired"):
+                if entry.reason:
+                    print(f"{entry.status}: {entry.path}: {entry.reason}")
+            elif entry.status == "pending":
+                if entry.reason:
+                    print(f"pending: {entry.path}: {entry.reason}")
+            elif entry.status == "running":
+                print(f"running: {entry.path}: {entry.reason}")
+            elif entry.status == "would-submit":
+                print(f"would-submit: {entry.path}")
+            for note in entry.notes:
+                print(f"note: {entry.path}: {note}")
+        for note in result.notes:
+            print(f"note: {note}")
+        for job in result.jobs:
+            print(
+                f"batch: {job.provider} {job.batch_id} "
+                f"({job.count} clips)"
+            )
+        print(result.outcome)
+        return 0
     try:
         try:
             vocabulary = (

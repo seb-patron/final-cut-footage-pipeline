@@ -1,0 +1,22 @@
+{
+  "id": "batch-invented-001",
+  "object": "batch",
+  "endpoint": "/v1/responses",
+  "errors": null,
+  "input_file_id": "file-invented-001",
+  "completion_window": "24h",
+  "status": "completed",
+  "output_file_id": "file-invented-out-001",
+  "error_file_id": "file-invented-err-001",
+  "incomplete_file_id": null,
+  "request_counts": {
+    "total": 4,
+    "completed": 1,
+    "failed": 3
+  },
+  "created_at": 1700000000,
+  "in_progress_at": 1700000060,
+  "expires_at": 1700086400,
+  "finalizing_at": 1700006000,
+  "completed_at": 1700006100
+}
