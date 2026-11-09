@@ -6,7 +6,8 @@ contract: ``title`` at the top level (``status``, ``created``, ``dates`` and
 ``youtube`` are accepted but unused); ``[final_cut]`` with ``library`` and
 ``events`` and ``[media]`` with ``footage``, ``photos`` and ``assets``,
 recorded as given; and the pipeline-owned ``[pipeline]`` table holding
-``timezone``, ``start_date``, ``clock_offsets``, ``places`` and ``offline``. Each other
+``timezone``, ``start_date``, ``clock_offsets``, ``places``, ``offline`` and
+the optional ``[pipeline.ai]`` provider setting. Each other
 top-level key or table, and each unknown key inside ``[pipeline]``, produces
 exactly one :class:`UserWarning` and loading still succeeds. Layout paths are
 recorded without creating or checking them.
@@ -20,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 #: Pipeline-owned keys: they belong under ``[pipeline]``, never at top level.
-TOP_LEVEL_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline")
+TOP_LEVEL_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline", "ai")
 #: Accepted top-level keys and tables; anything else warns exactly once.
 KNOWN_TOP_LEVEL_KEYS = (
     "title",
@@ -33,7 +34,179 @@ KNOWN_TOP_LEVEL_KEYS = (
     "pipeline",
 )
 #: Keys the pipeline owns inside ``[pipeline]``; anything else warns exactly once.
-KNOWN_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline")
+KNOWN_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline", "ai")
+#: AI step tables that may appear under ``[pipeline.ai]``.
+AI_STEP_TABLES = ("tag", "photos", "memo", "organize", "roughcut")
+#: Transcription tables under ``[pipeline.ai]``; they never inherit [pipeline.ai].
+AI_AUDIO_TABLES = ("memo_audio", "vo_audio")
+#: Keys accepted directly under ``[pipeline.ai]`` besides the step tables.
+AI_TOP_KEYS = ("provider", "model", "max_output_tokens", "prices")
+#: Keys accepted inside each per-step table under ``[pipeline.ai]``.
+AI_STEP_KEYS = ("provider", "model", "max_output_tokens")
+#: Services accepted as an AI step provider.
+AI_PROVIDERS = ("openai", "anthropic")
+#: Services accepted as a transcription provider.
+AI_AUDIO_PROVIDERS = ("openai", "local")
+
+
+def _ai_error(key: str, what: str) -> TripSettingsError:
+    """Build a settings error naming a ``[pipeline.ai...]`` key."""
+    return TripSettingsError(f"project.toml key '{key}' {what}")
+
+
+def _check_ai_provider(key: str, value) -> str:
+    if not isinstance(value, str) or value not in AI_PROVIDERS:
+        raise _ai_error(key, "must be \"openai\" or \"anthropic\"")
+    return value
+
+
+def _check_ai_audio_provider(key: str, value) -> str:
+    if not isinstance(value, str) or value not in AI_AUDIO_PROVIDERS:
+        raise _ai_error(key, "must be \"openai\" or \"local\"")
+    return value
+
+
+def _check_ai_model(key: str, value) -> str:
+    if not isinstance(value, str) or not value:
+        raise _ai_error(key, "must be a non-empty string")
+    return value
+
+
+def _check_ai_tokens(key: str, value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise _ai_error(key, "must be a positive integer")
+    return value
+
+
+def _check_ai_price(key: str, value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _ai_error(key, "must be a non-negative number")
+    if value < 0:
+        raise _ai_error(key, "must be a non-negative number")
+    return value
+
+
+def _validate_ai_table(raw) -> dict:
+    """Validate the ``[pipeline.ai]`` table into plain data.
+
+    Unknown keys and unknown step tables each produce exactly one
+    :class:`UserWarning` and loading still succeeds; type or value
+    problems raise :class:`TripSettingsError` naming the key.
+    """
+    if not isinstance(raw, dict):
+        raise TripSettingsError(
+            "project.toml table '[pipeline.ai]' must be a table"
+        )
+    out: dict = {}
+    if "provider" in raw:
+        out["provider"] = _check_ai_provider(
+            "[pipeline.ai].provider", raw["provider"]
+        )
+    if "model" in raw:
+        out["model"] = _check_ai_model("[pipeline.ai].model", raw["model"])
+    if "max_output_tokens" in raw:
+        out["max_output_tokens"] = _check_ai_tokens(
+            "[pipeline.ai].max_output_tokens", raw["max_output_tokens"]
+        )
+    if "prices" in raw:
+        prices = raw["prices"]
+        if not isinstance(prices, dict):
+            raise TripSettingsError(
+                "project.toml table '[pipeline.ai].prices' must be a table"
+            )
+        out_prices: dict = {}
+        for model_id, entry in prices.items():
+            base = f"[pipeline.ai.prices.{model_id!r}]"
+            if not isinstance(entry, dict):
+                raise TripSettingsError(
+                    f"project.toml table '{base}' must be a table"
+                )
+            checked: dict = {}
+            for rate_key in ("input_per_million", "output_per_million"):
+                if rate_key not in entry:
+                    raise _ai_error(
+                        f"{base}.{rate_key}", "is required"
+                    )
+                checked[rate_key] = _check_ai_price(
+                    f"{base}.{rate_key}", entry[rate_key]
+                )
+            for key in entry:
+                if key not in ("input_per_million", "output_per_million"):
+                    warnings.warn(
+                        f"unknown project.toml key: {base}.{key}",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+            out_prices[model_id] = checked
+        out["prices"] = out_prices
+    for step in AI_STEP_TABLES:
+        if step not in raw:
+            continue
+        table = raw[step]
+        base = f"[pipeline.ai.{step}]"
+        if not isinstance(table, dict):
+            raise TripSettingsError(
+                f"project.toml table '{base}' must be a table"
+            )
+        checked_step: dict = {}
+        if "provider" in table:
+            checked_step["provider"] = _check_ai_provider(
+                f"{base}.provider", table["provider"]
+            )
+        if "model" in table:
+            checked_step["model"] = _check_ai_model(
+                f"{base}.model", table["model"]
+            )
+        if "max_output_tokens" in table:
+            checked_step["max_output_tokens"] = _check_ai_tokens(
+                f"{base}.max_output_tokens", table["max_output_tokens"]
+            )
+        for key in table:
+            if key not in AI_STEP_KEYS:
+                warnings.warn(
+                    f"unknown project.toml key: {base}.{key}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        out[step] = checked_step
+    for step in AI_AUDIO_TABLES:
+        if step not in raw:
+            continue
+        table = raw[step]
+        base = f"[pipeline.ai.{step}]"
+        if not isinstance(table, dict):
+            raise TripSettingsError(
+                f"project.toml table '{base}' must be a table"
+            )
+        checked_audio: dict = {}
+        if "provider" in table:
+            checked_audio["provider"] = _check_ai_audio_provider(
+                f"{base}.provider", table["provider"]
+            )
+        if "model" in table:
+            checked_audio["model"] = _check_ai_model(
+                f"{base}.model", table["model"]
+            )
+        if "max_output_tokens" in table:
+            checked_audio["max_output_tokens"] = _check_ai_tokens(
+                f"{base}.max_output_tokens", table["max_output_tokens"]
+            )
+        for key in table:
+            if key not in ("provider", "model", "max_output_tokens"):
+                warnings.warn(
+                    f"unknown project.toml key: {base}.{key}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        out[step] = checked_audio
+    for key in raw:
+        if key not in AI_TOP_KEYS and key not in AI_STEP_TABLES + AI_AUDIO_TABLES:
+            warnings.warn(
+                f"unknown project.toml key: [pipeline.ai].{key}",
+                UserWarning,
+                stacklevel=2,
+            )
+    return out
 
 _CLOCK_OFFSET_RE = re.compile(r"([+-]?)([0-9]+):([0-5][0-9]):([0-5][0-9])")
 
@@ -53,6 +226,7 @@ class TripSettings:
     clock_offsets: dict[str, int] = field(default_factory=dict)
     places: list = field(default_factory=list)
     offline: bool = False
+    ai: dict = field(default_factory=dict)
     library: str = ""
     events: list = field(default_factory=list)
     footage: list = field(default_factory=list)
@@ -152,6 +326,8 @@ def load_trip(folder: str | Path) -> TripSettings:
             "project.toml key '[pipeline].offline' must be a boolean"
         )
 
+    ai = _validate_ai_table(pipeline.get("ai", {}))
+
     final_cut = data.get("final_cut", {})
     if not isinstance(final_cut, dict):
         raise TripSettingsError("project.toml table '[final_cut]' must be a table")
@@ -192,6 +368,7 @@ def load_trip(folder: str | Path) -> TripSettings:
         clock_offsets=clock_offsets,
         places=places,
         offline=offline,
+        ai=ai,
         library=library,
         events=events,
         footage=footage,
