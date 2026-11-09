@@ -244,7 +244,16 @@ small job files live under `.pipeline/tag-batch/`: one numbered file
 per batch holding only ids, clip numbers and checksums, never
 overwritten, safe to keep. Running `--batch` twice never sends a clip
 twice: clips already sitting in an open batch are listed as pending
-until you collect them.
+until you collect them. When the `.pipeline/tag-batch/` folder
+cannot be listed, or a job file cannot be read, the run stops with
+an error and sends nothing: an unreadable state is never treated as
+"no open jobs". A clip whose single request alone exceeds the
+per-request byte cap is listed as failed and never sent, while the
+rest proceed. A `.done.json` file counts as collected only when it
+is a regular file (never a symlink); anything else in its place
+stops the run with an error. Job numbers stay three digits: once
+`999` jobs exist, `--batch` refuses with an error before sending
+anything.
 
 `--collect` says `still running` while the provider is not finished,
 and a second collect after everything finished changes nothing: it

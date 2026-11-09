@@ -19,6 +19,7 @@ import datetime
 import json
 import math
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -205,15 +206,22 @@ def _check_cutoff(cutoff) -> None:
 
 
 def _next_job_number(settings) -> int:
-    """Return the next free three-digit job number for these settings."""
+    """Return the next free three-digit job number for these settings.
+
+    Raises :class:`TagBatchError` when the state folder cannot be
+    listed for any reason other than not existing yet, and when the
+    next number would no longer fit in three digits.
+    """
     folder = _state_dir(settings)
     top = 0
     try:
         children = sorted(folder.iterdir())
-    except (FileNotFoundError, NotADirectoryError):
+    except FileNotFoundError:
         return 1
-    except OSError:
-        return 1
+    except OSError as exc:
+        raise TagBatchError(
+            f"could not list tag-batch jobs in {folder} ({exc})"
+        ) from None
     for child in children:
         name = child.name
         if (
@@ -222,7 +230,13 @@ def _next_job_number(settings) -> int:
             and name[:3].isdigit()
         ):
             top = max(top, int(name[:3]))
-    return top + 1
+    number = top + 1
+    if number > 999:
+        raise TagBatchError(
+            "refusing the batch submit: job numbers stay three digits "
+            f"(001-999) and the next number would be {number}"
+        )
+    return number
 
 
 def _read_state_file(state_dir: Path, name: str) -> dict:
@@ -369,14 +383,23 @@ def _check_job_document(name: str, document: dict) -> dict:
 
 
 def _load_open_jobs(settings) -> list:
-    """Return ``(number, job document)`` for jobs with no done file yet."""
+    """Return ``(number, job document)`` for jobs with no done file yet.
+
+    Raises :class:`TagBatchError` when the state folder cannot be
+    listed for any reason other than not existing yet. A done file
+    counts as completion only when it is a regular, non-symlink file;
+    anything else in its place stops with the step's error instead of
+    being treated as collected or as missing.
+    """
     state_dir = _state_dir(settings)
     try:
         children = sorted(state_dir.iterdir())
-    except (FileNotFoundError, NotADirectoryError):
+    except FileNotFoundError:
         return []
-    except OSError:
-        return []
+    except OSError as exc:
+        raise TagBatchError(
+            f"could not list tag-batch jobs in {state_dir} ({exc})"
+        ) from None
     numbers: list[int] = []
     for child in children:
         name = child.name
@@ -393,9 +416,24 @@ def _load_open_jobs(settings) -> list:
             name, _read_state_file(state_dir, name)
         )
         done_name = f"{number:03d}.done.json"
-        if os.path.lexists(os.fspath(state_dir / done_name)):
+        try:
+            done_status = os.lstat(state_dir / done_name)
+        except FileNotFoundError:
+            open_jobs.append((number, document))
             continue
-        open_jobs.append((number, document))
+        except OSError as exc:
+            raise TagBatchError(
+                f"bad job file {done_name}: could not be read ({exc})"
+            ) from None
+        if stat.S_ISLNK(done_status.st_mode):
+            raise TagBatchError(
+                f"bad job file {done_name}: it is a symlink; "
+                "refusing to follow it"
+            )
+        if not stat.S_ISREG(done_status.st_mode):
+            raise TagBatchError(
+                f"bad job file {done_name}: not a regular file"
+            )
     return open_jobs
 
 
@@ -551,6 +589,21 @@ def _submit_entries(catalog, settings, rows, shown, schema, open_batch,
             settings, tag.STEP, instructions, schema, [image],
             backends=backends,
         )
+        size = len(json.dumps(request).encode("utf-8"))
+        if size > MAX_JOB_BYTES:
+            entries.append(
+                tag.TagEntry(
+                    path=path,
+                    asset_id=asset_id,
+                    status="failed",
+                    reason=(
+                        f"request is {size} bytes, over the "
+                        f"{MAX_JOB_BYTES}-byte per-request cap; "
+                        "not submitted"
+                    ),
+                )
+            )
+            continue
         notes = (transcript_note,) if transcript_note is not None else ()
         entries.append(
             tag.TagEntry(
@@ -576,8 +629,11 @@ def _split_jobs(eligible: list) -> list:
     """Group eligible clips, in order, into provider batch jobs.
 
     A job holds at most :data:`MAX_JOB_REQUESTS` requests and at most
-    :data:`MAX_JOB_BYTES` bytes of serialized request JSON; a job that
-    would overflow starts a new one. One trip usually makes one job.
+    :data:`MAX_JOB_BYTES` bytes of serialized request JSON, counting
+    request bytes, not state file bytes; a job that would overflow
+    starts a new one. One trip usually makes one job. Every request
+    here already fits :data:`MAX_JOB_BYTES` alone: oversized singles
+    are reported failed before grouping and never reach a job.
     """
     jobs: list = []
     current: list = []
@@ -662,8 +718,16 @@ def submit_batch(catalog, settings, *, vocabulary=None,
             config.provider, config.model, groups, float(cutoff), retag,
             shown,
         )
+        first_number = _next_job_number(settings)
+        if first_number + len(groups) - 1 > 999:
+            raise TagBatchError(
+                "refusing the batch submit: job numbers stay three "
+                "digits (001-999) and "
+                f"{len(groups)} new job(s) from number "
+                f"{first_number:03d} would pass 999"
+            )
         jobs: list = []
-        for group in groups:
+        for at, group in enumerate(groups):
             items = [
                 (item["custom_id"], item["request"]) for item in group
             ]
@@ -684,7 +748,7 @@ def submit_batch(catalog, settings, *, vocabulary=None,
                 config.provider, config.model, batch_id, _utc_now(),
                 float(cutoff), retag, shown, clips,
             )
-            number = _next_job_number(settings)
+            number = first_number + at
             try:
                 _write_state_file(settings, f"{number:03d}.job.json", document)
             except TagBatchError as exc:

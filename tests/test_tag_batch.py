@@ -1637,6 +1637,215 @@ class TestBatch(unittest.TestCase):
                 self.assertEqual(len(fake.batch_inputs), 5)
                 self.assertIn("submitted 5 in 5 batches", result.outcome)
 
+    def test_unreadable_state_dir_stops_before_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, footage, _ = self.make_project(tmp)
+            catalog = self.open_catalog(settings)
+            for asset in ("clip-a", "clip-b"):
+                media_id, _ = self.add_clip(
+                    catalog, footage, f"cove-{asset}.mov", asset
+                )
+                self.write_sheet(settings, catalog, media_id)
+            gate = net.NetworkGate(settings, "tag")
+            fake = FakeBatchOpenAI(gate)
+            state_dir = os.fspath(
+                Path(os.fspath(settings.folder))
+                / ".pipeline"
+                / "tag-batch"
+            )
+            real_iterdir = Path.iterdir
+
+            def fail_state_dir(path):
+                if os.fspath(path) == state_dir:
+                    raise PermissionError("invented denial")
+                return real_iterdir(path)
+
+            with mock.patch.object(Path, "iterdir", fail_state_dir):
+                with self.assertRaises(tag_batch.TagBatchError) as caught:
+                    tag_batch.submit_batch(
+                        catalog,
+                        settings,
+                        vocabulary=dict(VOCABULARY),
+                        backends={"openai": fake},
+                    )
+            self.assertIn("tag-batch", str(caught.exception))
+            self.assertEqual(fake.batch_inputs, [])
+
+    def test_oversized_single_request_reported_not_sent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, footage, _ = self.make_project(tmp)
+            catalog = self.open_catalog(settings)
+            for asset in ("clip-a", "clip-b"):
+                media_id, _ = self.add_clip(
+                    catalog, footage, f"cove-{asset}.mov", asset
+                )
+                self.write_sheet(settings, catalog, media_id)
+            big_id, _ = self.add_clip(
+                catalog, footage, "cove-clip-c.mov", "clip-c"
+            )
+            self.write_sheet(
+                settings,
+                catalog,
+                big_id,
+                data=fake_jpeg(1536, 864) + b"\x00" * 300_000,
+            )
+            gate = net.NetworkGate(settings, "tag")
+            fake = FakeBatchOpenAI(gate)
+            with mock.patch.object(tag_batch, "MAX_JOB_BYTES", 100_000):
+                result = tag_batch.submit_batch(
+                    catalog,
+                    settings,
+                    vocabulary=dict(VOCABULARY),
+                    backends={"openai": fake},
+                )
+            self.assertEqual(result.submitted, 2)
+            self.assertEqual(result.failed, 1)
+            failed = [e for e in result.entries if e.status == "failed"]
+            self.assertEqual([e.asset_id for e in failed], ["clip-c"])
+            self.assertIn("not submitted", failed[0].reason)
+            self.assertEqual(len(fake.batch_inputs), 1)
+            text = fake.batch_inputs[0].decode("utf-8")
+            self.assertIn("clip-1", text)
+            self.assertIn("clip-2", text)
+            self.assertNotIn("clip-3", text)
+
+    def test_symlinked_done_file_stops(self):
+        for bad_kind in ("symlink", "dangling-symlink", "directory", "fifo"):
+            with self.subTest(done=bad_kind):
+                with tempfile.TemporaryDirectory() as tmp:
+                    settings, footage, _ = self.make_project(tmp)
+                    catalog = self.open_catalog(settings)
+                    media_id, _ = self.add_clip(
+                        catalog, footage, "cove-a.mov", "clip-a"
+                    )
+                    self.write_sheet(settings, catalog, media_id)
+                    gate = net.NetworkGate(settings, "tag")
+                    fake = FakeBatchOpenAI(gate)
+                    tag_batch.submit_batch(
+                        catalog,
+                        settings,
+                        vocabulary=dict(VOCABULARY),
+                        backends={"openai": fake},
+                    )
+                    state_dir = (
+                        Path(os.fspath(settings.folder))
+                        / ".pipeline"
+                        / "tag-batch"
+                    )
+                    done_path = state_dir / "001.done.json"
+                    if bad_kind == "symlink":
+                        target = state_dir / "target.json"
+                        target.write_text("{}\n", encoding="utf-8")
+                        done_path.symlink_to(target)
+                    elif bad_kind == "dangling-symlink":
+                        done_path.symlink_to(state_dir / "missing.json")
+                    elif bad_kind == "directory":
+                        done_path.mkdir()
+                    else:
+                        os.mkfifo(done_path)
+                    uploads = len(fake.batch_inputs)
+                    with self.assertRaises(
+                        tag_batch.TagBatchError
+                    ) as caught:
+                        tag_batch.submit_batch(
+                            catalog,
+                            settings,
+                            vocabulary=dict(VOCABULARY),
+                            backends={"openai": fake},
+                        )
+                    self.assertIn("001.done.json", str(caught.exception))
+                    self.assertEqual(len(fake.batch_inputs), uploads)
+
+    def test_job_numbers_stop_at_999(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, footage, _ = self.make_project(tmp)
+            catalog = self.open_catalog(settings)
+            media_id, _ = self.add_clip(
+                catalog, footage, "cove-a.mov", "clip-a"
+            )
+            self.write_sheet(settings, catalog, media_id)
+            planted = tag_batch._job_document(
+                "openai",
+                FAKE_OPENAI_MODEL,
+                "batch-invented-999",
+                tag_batch._utc_now(),
+                0.75,
+                False,
+                dict(VOCABULARY),
+                [],
+            )
+            tag_batch._write_state_file(settings, "999.job.json", planted)
+            gate = net.NetworkGate(settings, "tag")
+            fake = FakeBatchOpenAI(gate)
+            with self.assertRaises(tag_batch.TagBatchError) as caught:
+                tag_batch.submit_batch(
+                    catalog,
+                    settings,
+                    vocabulary=dict(VOCABULARY),
+                    backends={"openai": fake},
+                )
+            self.assertIn("three digits", str(caught.exception))
+            self.assertEqual(fake.batch_inputs, [])
+
+        with self.subTest("two new groups past 998 refuse together"):
+            with tempfile.TemporaryDirectory() as tmp:
+                settings, footage, _ = self.make_project(tmp)
+                catalog = self.open_catalog(settings)
+                for asset in ("clip-a", "clip-b"):
+                    media_id, _ = self.add_clip(
+                        catalog, footage, f"cove-{asset}.mov", asset
+                    )
+                    self.write_sheet(settings, catalog, media_id)
+                planted = tag_batch._job_document(
+                    "openai",
+                    FAKE_OPENAI_MODEL,
+                    "batch-invented-998",
+                    tag_batch._utc_now(),
+                    0.75,
+                    False,
+                    dict(VOCABULARY),
+                    [],
+                )
+                tag_batch._write_state_file(settings, "998.job.json", planted)
+                gate = net.NetworkGate(settings, "tag")
+                fake = FakeBatchOpenAI(gate)
+                with mock.patch.object(tag_batch, "MAX_JOB_REQUESTS", 1):
+                    with self.assertRaises(
+                        tag_batch.TagBatchError
+                    ) as caught:
+                        tag_batch.submit_batch(
+                            catalog,
+                            settings,
+                            vocabulary=dict(VOCABULARY),
+                            backends={"openai": fake},
+                        )
+                self.assertIn("999", str(caught.exception))
+                self.assertEqual(fake.batch_inputs, [])
+
+    def test_next_job_number_refuses_unreadable_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, footage, _ = self.make_project(tmp)
+            catalog = self.open_catalog(settings)
+            media_id, _ = self.add_clip(
+                catalog, footage, "cove-a.mov", "clip-a"
+            )
+            self.write_sheet(settings, catalog, media_id)
+            state_dir = os.fspath(
+                Path(os.fspath(settings.folder))
+                / ".pipeline"
+                / "tag-batch"
+            )
+            real_iterdir = Path.iterdir
+
+            def fail_state_dir(path):
+                if os.fspath(path) == state_dir:
+                    raise PermissionError("invented denial")
+                return real_iterdir(path)
+
+            with mock.patch.object(Path, "iterdir", fail_state_dir):
+                with self.assertRaises(tag_batch.TagBatchError):
+                    tag_batch._next_job_number(settings)
+
     def test_stale_clip_not_tagged_on_collect(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings, footage, _ = self.make_project(tmp)
