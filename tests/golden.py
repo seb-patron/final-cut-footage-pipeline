@@ -258,7 +258,12 @@ def assert_golden(xml_bytes, name, *, golden_dir=None):
     else:
         directory = Path(golden_dir)
     golden_path = directory / ("%s.fcpxml" % name)
-    canonical = canonicalize(xml_bytes)
+    try:
+        canonical = canonicalize(xml_bytes)
+    except (OSError, UnicodeDecodeError, ET.ParseError) as exc:
+        raise AssertionError(
+            "unparseable candidate for golden %s: %s" % (golden_path, exc)
+        ) from exc
     if os.environ.get("GOLDEN_UPDATE") == "1":
         directory.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(canonical, encoding="utf-8")
@@ -267,20 +272,28 @@ def assert_golden(xml_bytes, name, *, golden_dir=None):
         raise AssertionError(
             "missing golden file %s; rerun with GOLDEN_UPDATE=1 to create it" % golden_path
         )
-    expected = golden_path.read_text(encoding="utf-8")
-    if canonical == expected:
-        return None
-    diff = "".join(difflib.unified_diff(
-        expected.splitlines(keepends=True),
-        canonical.splitlines(keepends=True),
-        fromfile=str(golden_path),
-        tofile="actual",
-    ))
+    # One handler for the whole golden read/decode/parse step, so no
+    # variant (OSError, undecodable bytes, malformed XML) escapes raw.
+    # diff holds whatever comparison was available before the failure.
+    diff = ""
     try:
+        expected = golden_path.read_text(encoding="utf-8")
+        if canonical == expected:
+            return None
+        diff = "".join(difflib.unified_diff(
+            expected.splitlines(keepends=True),
+            canonical.splitlines(keepends=True),
+            fromfile=str(golden_path),
+            tofile="actual",
+        ))
         tag, path = _first_difference(xml_bytes, expected)
-    except ET.ParseError as exc:
+    except (OSError, UnicodeDecodeError, ET.ParseError) as exc:
+        if isinstance(exc, ET.ParseError):
+            raise AssertionError(
+                "malformed golden file %s: %s\n%s" % (golden_path, exc, diff)
+            ) from exc
         raise AssertionError(
-            "malformed golden file %s: %s\n%s" % (golden_path, exc, diff)
+            "unreadable golden file %s: %s\n%s" % (golden_path, exc, diff)
         ) from exc
     raise AssertionError(
         "golden mismatch for %s: first difference at <%s> (path %s)\n%s"

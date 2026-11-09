@@ -134,6 +134,19 @@ class TestGolden(unittest.TestCase):
             self.assertIn("@@", message)
             self.assertIsInstance(ctx.exception.__cause__, ET.ParseError)
 
+    def test_undecodable_golden_reports_assertion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            golden_dir = Path(tmp) / "goldens"
+            golden_dir.mkdir(parents=True)
+            golden_path = golden_dir / "clip.fcpxml"
+            golden_path.write_bytes(b"\xff")
+            with without_golden_update():
+                with self.assertRaises(AssertionError) as ctx:
+                    assert_golden(ORDER_A, "clip", golden_dir=golden_dir)
+            message = str(ctx.exception)
+            self.assertIn(str(golden_path), message)
+            self.assertIsInstance(ctx.exception.__cause__, UnicodeDecodeError)
+
     def test_dtd_skips_when_missing(self):
         missing = "/nonexistent/FCPXMLv1_14.dtd"
         with mock.patch.dict(os.environ, {"FCP_DTD": missing}):
