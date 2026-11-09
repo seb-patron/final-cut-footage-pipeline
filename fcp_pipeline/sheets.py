@@ -5,7 +5,9 @@ times (nine even slices, plus ffmpeg scene changes thinned evenly), pulls
 those frames with ffmpeg, and composes a 3x3 grid of 1536x864 pixels with
 each 512x288 tile stamped with its source time in seconds. The sheet is
 saved as a JPEG under ``.pipeline/sheets/`` with a small manifest holding
-the tile times, both through the safe write layer.
+the drawn tile times and a scene count, both through the safe write layer.
+Detected scene times are never stored, and a manifest that would exceed
+5 MB raises instead of writing anything.
 
 The same clip gives the same sheet: tile times are exact fractions, the
 stamp is drawn by this module (no font, no drawtext filter), and every
@@ -61,6 +63,11 @@ SHEET_HEIGHT = GRID_ROWS * TILE_HEIGHT
 
 #: Most tiles one sheet holds; more candidates are thinned evenly.
 MAX_TILES = 9
+
+#: Largest serialized manifest allowed: the project's 5 MB per-file
+#: limit. A manifest that would exceed it raises :class:`SheetError`
+#: and nothing is written (never a partial file).
+MAX_MANIFEST_BYTES = 5_000_000
 
 #: Clips shorter than this get a single tile at their middle.
 SHORT_CLIP_SECONDS = Fraction(3, 1)
@@ -563,10 +570,49 @@ def _manifest_document(
     sheet_name: str,
     digest: str,
     duration: Fraction,
-    scenes: list[Fraction],
-    times: list[Fraction],
+    scenes: object,
+    times: object,
 ) -> dict:
-    """Build the manifest mapping for one sheet, keys in file order."""
+    """Build the manifest mapping for one sheet, keys in file order.
+
+    Only the tile times actually drawn (at most ``MAX_TILES``) and the
+    total scene count are stored: the detected scene times themselves
+    are never stored, so the manifest stays far under
+    ``MAX_MANIFEST_BYTES`` no matter how long the clip is. ``scenes``
+    is the detected scene-time sequence (or an already-counted
+    non-negative int); ``truncated`` is true only when more tile times
+    were handed in than the cap keeps (:func:`build_sheets` never
+    triggers it, since :func:`tile_times` already thins to nine).
+    """
+    if isinstance(scenes, bool):
+        raise SheetError(
+            f"bad scene count {scenes!r}: must be a non-negative int"
+        )
+    if isinstance(scenes, int):
+        scene_count = scenes
+    else:
+        try:
+            scene_count = len(scenes)  # type: ignore[arg-type]
+        except TypeError:
+            raise SheetError(
+                f"bad scenes {scenes!r}: must be a sequence or int"
+            ) from None
+    if scene_count < 0:
+        raise SheetError(
+            f"bad scene count {scene_count!r}: must be non-negative"
+        )
+    try:
+        drawn = list(times)  # type: ignore[arg-type]
+    except TypeError:
+        raise SheetError(
+            f"bad tile times {times!r}: must be a sequence"
+        ) from None
+    stored = drawn[:MAX_TILES]
+    for moment in stored:
+        if isinstance(moment, bool) or not isinstance(moment, (Fraction, int)):
+            raise SheetError(
+                f"bad tile time {moment!r}: must be a Fraction, never a float"
+            )
     return {
         "version": 1,
         "asset_id": asset_id,
@@ -576,12 +622,31 @@ def _manifest_document(
         "grid": [GRID_COLUMNS, GRID_ROWS],
         "tile_size": [TILE_WIDTH, TILE_HEIGHT],
         "duration": _fraction_text(duration),
-        "scene_changes": [_fraction_text(moment) for moment in scenes],
+        "scene_count": scene_count,
+        "truncated": len(drawn) > MAX_TILES,
         "tiles": [
             {"index": at, "time": _fraction_text(moment)}
-            for at, moment in enumerate(times)
+            for at, moment in enumerate(stored)
         ],
     }
+
+
+def _manifest_bytes(document: dict) -> bytes:
+    """Serialize a manifest, refusing oversize payloads.
+
+    Returns the exact bytes to write. When they exceed
+    ``MAX_MANIFEST_BYTES`` raises :class:`SheetError` and the caller
+    writes nothing (never a partial file): call this before any write
+    for the clip.
+    """
+    payload = (json.dumps(document, indent=2) + "\n").encode("utf-8")
+    if len(payload) > MAX_MANIFEST_BYTES:
+        raise SheetError(
+            f"refused manifest for {document.get('sheet', 'sheet')}: "
+            f"{len(payload)} bytes is over the "
+            f"{MAX_MANIFEST_BYTES}-byte cap; nothing was written"
+        )
+    return payload
 
 
 def _manifest_path(settings: object, manifest_name: str) -> Path:
@@ -773,9 +838,10 @@ def build_sheets(
                 document = _manifest_document(
                     asset_id, sheet_name, digest, duration, scenes, times
                 )
-                manifest_bytes = (
-                    json.dumps(document, indent=2) + "\n"
-                ).encode("utf-8")
+                # The size check runs before any write for this clip:
+                # an oversize manifest raises SheetError here, so neither
+                # the sheet nor the manifest is written (no partial file).
+                manifest_bytes = _manifest_bytes(document)
                 if sheet_path.exists():
                     if sheet_path.read_bytes() == sheet_bytes:
                         writer.write_new(manifest_path, manifest_bytes)

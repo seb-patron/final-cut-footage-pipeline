@@ -53,11 +53,25 @@ Each sheet's file name starts with the clip's file name (with any
 unusual characters replaced by `_`) followed by a short code for the
 clip's current state, such as `harbor-morning-a1b2c3d4.jpg`. Next to
 every sheet sits a manifest with the same name ending in `.json`. The
-manifest records the clip's catalog id, the sheet's file name and
-checksum, the sheet and tile sizes, the exact clip duration, the scene
-changes found, and the nine (or fewer) tile times with their positions
-in the grid. The catalog itself has no table for tile times yet, so the
-manifest next to each sheet is where they live.
+manifest holds only these fields:
+
+- `version`: always `1`.
+- `asset_id`: the clip's catalog id.
+- `sheet`: the sheet's file name.
+- `sheet_sha256`: checksum of the sheet bytes.
+- `sheet_size`: `[1536, 864]`.
+- `grid`: `[3, 3]`.
+- `tile_size`: `[512, 288]`.
+- `duration`: the exact clip duration as a fraction (for example `60/1`).
+- `scene_count`: how many scene changes were detected (the times themselves are never stored).
+- `truncated`: whether the stored tile list was capped (always `false` from this step; tile times are already thinned to nine).
+- `tiles`: the drawn tile times with grid positions, at most nine entries of `{"index": n, "time": "N/D"}`.
+
+Manifests stay far under the 5 MB per-file limit: only the drawn tile
+times and the scene count are stored, and a manifest that would exceed
+the limit raises instead of writing anything. The catalog itself has no
+table for tile times yet, so the manifest next to each sheet is where
+they live.
 
 ## Reruns skip what has not changed
 

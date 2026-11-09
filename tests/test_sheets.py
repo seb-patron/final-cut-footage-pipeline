@@ -30,9 +30,12 @@ from unittest import mock
 
 from fcp_pipeline.catalog import Catalog, MediaRecord
 from fcp_pipeline.sheets import (
+    MAX_MANIFEST_BYTES,
     SheetEntry,
     SheetError,
     SheetsResult,
+    _manifest_bytes,
+    _manifest_document,
     build_sheets,
     main,
     read_manifest,
@@ -336,7 +339,9 @@ class TestSheets(unittest.TestCase):
                 [Fraction(entry["time"]) for entry in document["tiles"]],
                 SIXTY_SECOND_TILES,
             )
-            self.assertEqual(document["scene_changes"], [])
+            self.assertEqual(document["scene_count"], 0)
+            self.assertFalse(document["truncated"])
+            self.assertNotIn("scene_changes", document)
             self.assertEqual(
                 tile_times(Fraction(60), ()), SIXTY_SECOND_TILES)
 
@@ -378,12 +383,122 @@ class TestSheets(unittest.TestCase):
                 '  "sheet_size": [\n    1536,\n    864\n  ],\n'
                 '  "grid": [\n    3,\n    3\n  ],\n'
                 '  "tile_size": [\n    512,\n    288\n  ],\n'
-                '  "duration": "60/1",\n  "scene_changes": [],\n'
+                '  "duration": "60/1",\n  "scene_count": 0,\n'
+                '  "truncated": false,\n'
                 '  "tiles": [\n' % (sheet_name, digest)
                 + tiles + '  ]\n}\n'
             )
             self.assertEqual(
                 manifests[0].read_text(encoding="utf-8"), expected)
+
+    def test_manifest_stays_small_with_many_scenes(self):
+        # Serializer-level: 400,000 synthetic scene entries at 60 fps
+        # with no video and no ffmpeg. Only the drawn tile times and
+        # the scene count reach the manifest, so it stays far under
+        # the 5 MB per-file limit.
+        scenes = [Fraction(at, 60) for at in range(400_000)]
+        times = tile_times(Fraction(60), ())
+        document = _manifest_document(
+            "sheet-many-scenes",
+            "many-12345678.jpg",
+            "0" * 64,
+            Fraction(60, 1),
+            scenes,
+            times,
+        )
+        payload = _manifest_bytes(document)
+        self.assertEqual(document["scene_count"], 400_000)
+        self.assertEqual(len(document["tiles"]), 9)
+        self.assertNotIn("scene_changes", document)
+        self.assertLess(len(payload), MAX_MANIFEST_BYTES)
+        self.assertLess(len(payload), 10_000)
+
+    def test_manifest_truncation_flag(self):
+        times = [Fraction(at, 60) for at in range(12)]
+        document = _manifest_document(
+            "sheet-truncated",
+            "truncated-12345678.jpg",
+            "0" * 64,
+            Fraction(60, 1),
+            [],
+            times,
+        )
+        self.assertTrue(document["truncated"])
+        self.assertEqual(len(document["tiles"]), 9)
+        payload = _manifest_bytes(document)
+        self.assertLess(len(payload), MAX_MANIFEST_BYTES)
+
+    def test_oversize_manifest_raises_and_writes_nothing(self):
+        huge = {
+            "version": 1,
+            "sheet": "huge-12345678.jpg",
+            "pad": "x" * (MAX_MANIFEST_BYTES + 1),
+        }
+        with self.assertRaises(SheetError):
+            _manifest_bytes(huge)
+        # The size check runs before any write for the clip: force an
+        # oversize manifest through build_sheets with synthetic bytes
+        # and mocked ffmpeg helpers (no video, no ffmpeg), and prove
+        # neither the sheet nor the manifest is left behind.
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, footage, _project = self.make_project(tmp)
+            clip = footage / "clip.mov"
+            clip.write_bytes(b"not a video; ffmpeg is mocked out")
+            info = os.stat(clip)
+            with Catalog.open(settings) as catalog:
+                catalog.put_media(
+                    MediaRecord(
+                        asset_id="sheet-huge",
+                        kind="clip",
+                        path=os.fspath(clip),
+                        size=info.st_size,
+                        mtime_ns=info.st_mtime_ns,
+                        inode=info.st_ino,
+                        duration=Fraction(60, 1),
+                    )
+                )
+                oversized = {
+                    "version": 1,
+                    "sheet": "clip-12345678.jpg",
+                    "pad": "x" * (MAX_MANIFEST_BYTES + 1),
+                }
+
+                def fake_extract(
+                    clip_path, at, stamp, tile_path, *,
+                    runner, timeout,
+                ):
+                    Path(tile_path).write_bytes(b"tile")
+                    return mock.Mock(returncode=0)
+
+                def fake_compose(
+                    tile_paths, grid_path, *, runner, timeout
+                ):
+                    Path(grid_path).write_bytes(b"grid")
+                    return mock.Mock(returncode=0)
+
+                with mock.patch(
+                    "fcp_pipeline.sheets._detect_scenes",
+                    return_value=([], 0, ""),
+                ), mock.patch(
+                    "fcp_pipeline.sheets._manifest_document",
+                    return_value=oversized,
+                ), mock.patch(
+                    "fcp_pipeline.sheets._extract_tile",
+                    side_effect=fake_extract,
+                ), mock.patch(
+                    "fcp_pipeline.sheets._compose_grid",
+                    side_effect=fake_compose,
+                ):
+                    with self.assertRaises(SheetError):
+                        build_sheets(
+                            catalog, settings, runner=CountingRunner())
+            folder = self.sheets_dir(_project)
+            leftovers = (
+                sorted(child.name for child in folder.iterdir())
+                if folder.is_dir() else []
+            )
+            self.assertEqual(leftovers, [])
 
     def test_scene_change_tile_included(self):
         _require_sheet_tools()
@@ -404,7 +519,9 @@ class TestSheets(unittest.TestCase):
                      for entry in document["tiles"]]
             self.assertEqual(len(times), 9)
             self.assertIn(Fraction(31, 1), times)
-            self.assertEqual(document["scene_changes"], ["31/1"])
+            self.assertEqual(document["scene_count"], 1)
+            self.assertFalse(document["truncated"])
+            self.assertNotIn("scene_changes", document)
             sheets = sorted(child for child in self.sheets_dir(project).iterdir()
                             if child.suffix == ".jpg")
             self.assertEqual(len(sheets), 1)
