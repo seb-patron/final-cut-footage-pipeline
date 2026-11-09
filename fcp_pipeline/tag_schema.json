@@ -1,0 +1,72 @@
+{
+  "type": "object",
+  "description": "The tag step's structured answer for one clip.",
+  "properties": {
+    "description": {
+      "type": "string",
+      "description": "One or two sentences saying what the clip shows."
+    },
+    "shot": {
+      "type": "string",
+      "description": "The framing of the clip.",
+      "enum": ["wide", "medium", "close-up", "detail", "establishing", "aerial", "pov", "static", "other"]
+    },
+    "ranges": {
+      "type": "array",
+      "description": "Time ranges with vocabulary tags, in seconds from the clip start.",
+      "items": {
+        "type": "object",
+        "description": "One tagged time range.",
+        "properties": {
+          "start": {
+            "type": "number",
+            "description": "Range start in seconds from the clip start, read from the tile stamps."
+          },
+          "end": {
+            "type": "number",
+            "description": "Range end in seconds from the clip start, read from the tile stamps."
+          },
+          "tags": {
+            "type": "array",
+            "description": "Vocabulary tags for this range.",
+            "items": {
+              "type": "object",
+              "description": "One vocabulary tag.",
+              "properties": {
+                "folder": {
+                  "type": "string",
+                  "description": "The vocabulary folder naming what kind of label this is."
+                },
+                "value": {
+                  "type": "string",
+                  "description": "The vocabulary value for this range."
+                }
+              },
+              "required": ["folder", "value"],
+              "additionalProperties": false
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "description": "Confidence in this range from 0 to 1."
+          }
+        },
+        "required": ["start", "end", "tags", "confidence"],
+        "additionalProperties": false
+      }
+    },
+    "problems": {
+      "type": "array",
+      "description": "Visible problems such as a smudge or a blocked view, empty when none.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "outline_hint": {
+      "type": ["string", "null"],
+      "description": "A short hint for matching this clip to the outline later, or null."
+    }
+  },
+  "required": ["description", "shot", "ranges", "problems", "outline_hint"],
+  "additionalProperties": false
+}
