@@ -10,6 +10,8 @@ itself.
 
 from __future__ import annotations
 
+import math
+
 
 class AiSchemaError(ValueError):
     """Raised when a schema leaves the supported strict subset."""
@@ -162,7 +164,11 @@ def _matches_type(value, name: str) -> bool:
     if name == "integer":
         return isinstance(value, int) and not isinstance(value, bool)
     if name == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, float) and not math.isfinite(value):
+            return False
+        return isinstance(value, (int, float))
     if name == "boolean":
         return isinstance(value, bool)
     if name == "null":
@@ -230,6 +236,8 @@ def _validate_node(value, node: dict, path: str, problems: list[str]) -> None:
         if "maxLength" in node and len(value) > node["maxLength"]:
             problems.append(f"{path}: too long")
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            problems.append(f"{path}: expected finite number")
         if "minimum" in node and value < node["minimum"]:
             problems.append(f"{path}: below minimum")
         if "maximum" in node and value > node["maximum"]:

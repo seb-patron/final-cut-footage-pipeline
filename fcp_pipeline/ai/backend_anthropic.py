@@ -14,7 +14,7 @@ import base64
 import json
 from typing import Any
 
-from .backend_openai import Reply, _count, _get
+from .backend_openai import Reply, _count, _get, _reject_constant
 
 
 class AnthropicBackend:
@@ -80,7 +80,7 @@ class AnthropicBackend:
         if not text.strip():
             return Reply(None, input_tokens, output_tokens)
         try:
-            data: Any = json.loads(text)
+            data: Any = json.loads(text, parse_constant=_reject_constant)
         except ValueError:
             data = None
         return Reply(data, input_tokens, output_tokens)

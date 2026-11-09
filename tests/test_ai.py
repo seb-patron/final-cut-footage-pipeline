@@ -31,6 +31,7 @@ from fcp_pipeline.ai import (
     OpenAIBackend,
     ask,
     step_config,
+    validate,
 )
 from fcp_pipeline.net import NetworkGate, OfflineError, set_offline
 from fcp_pipeline.trip import load_trip
@@ -118,6 +119,21 @@ def bad_openai_raw() -> dict:
 def bad_anthropic_raw() -> dict:
     """Anthropic-shaped answer missing the required ``reason`` field."""
     return anthropic_raw({"title": "Harborlight dawn"})
+
+
+def anthropic_raw_text(
+    answer_text: str, input_tokens=1000, output_tokens=500
+) -> dict:
+    """Recorded-style Anthropic Messages result carrying raw ``answer_text``."""
+    return {
+        "content": [
+            {"type": "text", "text": answer_text},
+        ],
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        },
+    }
 
 
 class FakeOpenAI(OpenAIBackend):
@@ -893,6 +909,95 @@ class TestAi(unittest.TestCase):
                     self.assertEqual(
                         (reply.input_tokens, reply.output_tokens), (7, 3)
                     )
+
+    def test_non_finite_answers_rejected(self):
+        rating_schema = {
+            "type": "object",
+            "properties": {"rating": {"type": "number"}},
+            "required": ["rating"],
+            "additionalProperties": False,
+        }
+        good_text = json.dumps({"rating": 4.5})
+        for provider in ("openai", "anthropic"):
+            ai_extra = (
+                "[pipeline.ai]\n"
+                f'provider = "{provider}"\n'
+                'model = "fake-model"\n'
+            )
+            for bad_text in (
+                '{"rating": NaN}',
+                '{"rating": Infinity}',
+                '{"rating": -Infinity}',
+            ):
+                with self.subTest(provider=provider, text=bad_text):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        settings = load_trip(write_project(Path(tmp), ai_extra))
+                        gate = NetworkGate(settings, "tag")
+                        if provider == "openai":
+                            retry = FakeOpenAI(
+                                gate,
+                                [openai_raw(bad_text), openai_raw(good_text)],
+                            )
+                        else:
+                            retry = FakeAnthropic(
+                                gate,
+                                [
+                                    anthropic_raw_text(bad_text),
+                                    anthropic_raw_text(good_text),
+                                ],
+                            )
+                        # A non-finite answer parses to no data, so the
+                        # first attempt fails its checks and the retry
+                        # supplies the accepted answer.
+                        self.assertEqual(
+                            ask(settings, "tag", INSTRUCTIONS, rating_schema,
+                                backends={provider: retry}),
+                            {"rating": 4.5},
+                        )
+                        self.assertEqual(len(retry.requests), 2)
+                    with tempfile.TemporaryDirectory() as tmp:
+                        settings = load_trip(write_project(Path(tmp), ai_extra))
+                        gate = NetworkGate(settings, "tag")
+                        if provider == "openai":
+                            failing = FakeOpenAI(
+                                gate,
+                                [openai_raw(bad_text), openai_raw(bad_text)],
+                            )
+                        else:
+                            failing = FakeAnthropic(
+                                gate,
+                                [
+                                    anthropic_raw_text(bad_text),
+                                    anthropic_raw_text(bad_text),
+                                ],
+                            )
+                        # ask() never returns the non-finite answer: two
+                        # in a row raise through the retry/error path.
+                        with self.assertRaises(AiAnswerError):
+                            ask(settings, "tag", INSTRUCTIONS, rating_schema,
+                                backends={provider: failing})
+                        self.assertEqual(len(failing.requests), 2)
+
+    def test_schema_rejects_non_finite_numbers(self):
+        number_schema = {"type": "number"}
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                self.assertTrue(validate(value, number_schema))
+        rating_schema = {
+            "type": "object",
+            "properties": {"rating": {"type": "number"}},
+            "required": ["rating"],
+            "additionalProperties": False,
+        }
+        for value in (float("nan"), float("inf")):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    validate({"rating": value}, rating_schema)
+                )
+        self.assertEqual(validate(4.5, number_schema), [])
+        self.assertEqual(
+            validate({"rating": 4.5}, rating_schema), []
+        )
 
     def test_refused_usage_write_keeps_answer(self):
         ai_extra = (

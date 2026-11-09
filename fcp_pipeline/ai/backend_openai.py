@@ -46,6 +46,11 @@ def _count(value) -> int:
     return number if number >= 0 else 0
 
 
+def _reject_constant(value: str):
+    """Reject ``NaN``/``Infinity`` constants; model answers must be finite."""
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
 class OpenAIBackend:
     """One OpenAI Responses API call through a network gate."""
 
@@ -117,7 +122,7 @@ class OpenAIBackend:
         if not text.strip():
             return Reply(None, input_tokens, output_tokens)
         try:
-            data = json.loads(text)
+            data = json.loads(text, parse_constant=_reject_constant)
         except ValueError:
             data = None
         return Reply(data, input_tokens, output_tokens)
