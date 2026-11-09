@@ -47,7 +47,7 @@ created if it is missing. The log is opened relative to directory file
 descriptors with `O_NOFOLLOW` at every component under the trip folder
 (openat-style via `dir_fd`), so if `.pipeline` or the log file itself is
 a symlink, the write is refused rather than followed, and a swapped link
-can never redirect the log outside the trip folder. After the log file is
+can never redirect the log outside the trip folder. The log file itself is opened with `O_NONBLOCK` so an existing FIFO can never block the open, and only a regular file is ever written: any other file type at the log path is closed and refused without writing anything. After the log file is
 opened, the opened `.pipeline` directory is re-verified with `fstat` and
 `fstatat` (same `st_dev` and `st_ino` as `root_fd/.pipeline`); if that
 check fails, only the file this call just created is removed, nothing is

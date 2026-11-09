@@ -12,6 +12,7 @@ import contextlib
 import io
 import os
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,11 @@ from fcp_pipeline.net import NetworkGate, OfflineError, set_offline
 from fcp_pipeline.trip import TripSettingsError, load_trip
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Captured at import time, before setUp patches the subprocess module:
+# the FIFO test below must spawn a real child process with a timeout.
+_REAL_SUBPROCESS_RUN = subprocess.run
+_REAL_SUBPROCESS_POPEN = subprocess.Popen
 
 FAKE_OPENAI_KEY = "fake-test-openai-key-ALPHA-7741"
 FAKE_ANTHROPIC_KEY = "fake-test-anthropic-key-BETA-7741"
@@ -265,6 +271,52 @@ class TestNet(unittest.TestCase):
                 "refusing to write the network log outside the project folder",
             )
             self.assertFalse(capture.exists())
+            self.assertNoSocketUse()
+
+    def test_fifo_log_path_never_hangs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_trip(Path(tmp))
+            (trip / ".pipeline").mkdir()
+            fifo = trip / ".pipeline" / "network-log.tsv"
+            os.mkfifo(fifo)
+            script = "\n".join(
+                [
+                    "import sys",
+                    f"sys.path.insert(0, {str(REPO_ROOT)!r})",
+                    "from fcp_pipeline.trip import load_trip",
+                    "from fcp_pipeline.net import NetworkGate",
+                    "gate = NetworkGate(load_trip(sys.argv[1]), 'scan')",
+                    "def request():",
+                    "    print('request-ran', flush=True)",
+                    "    return 'ok'",
+                    "try:",
+                    "    result = gate.call("
+                    "'openai', 'test-model', [('text', 5)], request)",
+                    "    print('returned:' + str(result), flush=True)",
+                    "except RuntimeError as exc:",
+                    "    print('refused:' + str(exc), flush=True)",
+                    "    raise SystemExit(3)",
+                ]
+            )
+            with mock.patch.object(
+                subprocess, "run", _REAL_SUBPROCESS_RUN
+            ), mock.patch.object(subprocess, "Popen", _REAL_SUBPROCESS_POPEN):
+                proc = subprocess.run(
+                    [sys.executable, "-c", script, str(trip)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            # Bounded time: subprocess.run raises TimeoutExpired (and kills
+            # the child) instead of returning when the call hangs.
+            self.assertEqual(proc.returncode, 3)
+            self.assertIn("request-ran", proc.stdout)
+            self.assertIn(
+                "refusing to write the network log outside the project folder",
+                proc.stdout,
+            )
+            self.assertNotIn("returned:", proc.stdout)
+            self.assertTrue(stat.S_ISFIFO(os.stat(fifo).st_mode))
             self.assertNoSocketUse()
 
     def test_renamed_pipeline_between_open_is_refused(self):
