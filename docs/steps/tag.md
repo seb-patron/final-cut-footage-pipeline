@@ -216,5 +216,66 @@ that gets an answer appends one row to `.pipeline/ai-usage.tsv` with
 the step, provider, model and token counts, never words or pixels; see
 [docs/privacy.md](../privacy.md).
 
-Batch mode, the side-by-side provider test and the pipeline command's
-`tag` subcommand come later.
+## Tagging a whole trip in batch mode
+
+One-clip tagging above asks for an answer and waits for it. For a whole
+trip you do not need right now, there is a cheaper way: the providers
+sell the same call as a batch service, at about half the price, with
+results usually back within a day. Two commands use it:
+
+```
+python3 -m fcp_pipeline.tag --trip <folder> --batch
+python3 -m fcp_pipeline.tag --trip <folder> --collect
+```
+
+`--batch` sends every tag-eligible clip and returns at once; `--collect`
+runs later (any time, as often as you like) and stores the answers.
+`--cutoff`, `--retag` and `--vocabulary` apply when submitting and are
+remembered with the job, so `--collect` needs none of them.
+
+What goes out is exactly what one-clip tagging sends, per clip: the
+one contact-sheet picture plus the same prompt text, and only through
+the same network gate. Nothing from the footage folders leaves the
+machine, and nothing else is uploaded.
+
+A very large trip is split into several batches; each batch id is
+printed on its own `batch:` line and recorded in the run list. The
+small job files live under `.pipeline/tag-batch/`: one numbered file
+per batch holding only ids, clip numbers and checksums, never
+overwritten, safe to keep. Running `--batch` twice never sends a clip
+twice: clips already sitting in an open batch are listed as pending
+until you collect them.
+
+`--collect` says `still running` while the provider is not finished,
+and a second collect after everything finished changes nothing: it
+finds no open batch and leaves every tag exactly as it was. Every
+answer is checked exactly like a one-clip answer — same cutoff, same
+remembered vocabulary, same locked-tag protection — except a bad answer
+is not retried inside the batch: it is listed, and a normal `--batch`
+or one-clip run picks that clip up later. Failed, expired and stale
+clips are listed one line each.
+
+Each collected answer appends one row to `.pipeline/ai-usage.tsv`;
+the cost column uses the standard price list, so it shows about
+double a batch run's real cost.
+
+The command and its exit codes:
+
+```
+python3 -m fcp_pipeline.tag --trip <folder> --batch [--cutoff N] [--retag] [--dry-run] [--vocabulary FILE]
+python3 -m fcp_pipeline.tag --trip <folder> --collect
+```
+
+- `0`: the run completed (failed, stale, expired, pending and running
+  clips do not fail it).
+- `1`: the trip, catalog, vocabulary file or job state could not be
+  read or written.
+- `2`: the command was used wrongly, or the model setting is missing.
+- `3`: the switch is offline.
+
+Offline mode refuses before anything is uploaded or downloaded: with
+`offline = true` in `[pipeline]` or `--offline` on the command, the
+run stops before the first batch call.
+
+The side-by-side provider test and the pipeline command's `tag`
+subcommand come later.

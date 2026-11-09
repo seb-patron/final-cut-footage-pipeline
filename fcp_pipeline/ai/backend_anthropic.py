@@ -14,7 +14,17 @@ import base64
 import json
 from typing import Any
 
-from .backend_openai import Reply, _count, _get, _reject_constant
+from .backend_openai import (
+    BatchItem,
+    BatchStatus,
+    Reply,
+    _anthropic_batch_item,
+    _batch_status,
+    _count,
+    _get,
+    _openai_batch_item,
+    _reject_constant,
+)
 
 
 class AnthropicBackend:
@@ -97,3 +107,120 @@ class AnthropicBackend:
                 )
             )
         )
+
+    def build_batch_input(self, items) -> list:
+        """Return the Message Batches input list for ``items``.
+
+        ``items`` holds ``(custom_id, request)`` pairs where ``request``
+        is exactly what :meth:`build_request` returns. One entry per
+        item, each carrying the one-clip request as its ``params``, so
+        the batch run answers the same requests the one-clip call would
+        send.
+        """
+        return [
+            {"custom_id": custom_id, "params": request}
+            for custom_id, request in items
+        ]
+
+    def create_batch(self, batch_input: list) -> str:
+        """Submit ``batch_input`` as one batch; the only SDK caller here.
+
+        Makes one ``messages.batches.create`` call and returns the new
+        batch id.
+        """
+        client = self._gate.anthropic_client()
+        batch = client.messages.batches.create(requests=batch_input)
+        if hasattr(batch, "model_dump"):
+            batch = batch.model_dump()
+        return _get(batch, "id")
+
+    def retrieve_batch(self, batch_id: str) -> dict:
+        """Return one batch object as a plain dict; touches the SDK."""
+        client = self._gate.anthropic_client()
+        result = client.messages.batches.retrieve(batch_id)
+        if hasattr(result, "model_dump"):
+            result = result.model_dump()
+        return dict(result)
+
+    def parse_batch_status(self, raw) -> BatchStatus:
+        """Map a provider batch object to a :class:`BatchStatus`.
+
+        Shared with the OpenAI backend's mapping: Anthropic's
+        ``processing_status`` (``in_progress``/``canceling`` run,
+        ``ended`` is done) and OpenAI's ``status`` (``validating``,
+        ``in_progress``, ``finalizing`` and ``cancelling`` run;
+        ``completed`` is done; ``failed``, ``expired`` and
+        ``cancelled`` keep their names). Anything else is failed.
+        """
+        return _batch_status(raw)
+
+    def fetch_batch_results(self, batch_id: str, raw_status) -> list:
+        """Download a batch's result entries; the only SDK caller here.
+
+        Returns each entry of ``messages.batches.results(batch_id)``
+        as a plain dict.
+        """
+        client = self._gate.anthropic_client()
+        entries = []
+        for entry in client.messages.batches.results(batch_id):
+            if hasattr(entry, "model_dump"):
+                entry = entry.model_dump()
+            entries.append(
+                dict(entry) if isinstance(entry, dict) else entry
+            )
+        return entries
+
+    def parse_batch_results(self, raw) -> list[BatchItem]:
+        """Parse downloaded batch data into :class:`BatchItem` items.
+
+        Accepts the same shapes as the OpenAI backend's parsing (JSONL
+        text, entry lists, or the OpenAI fetch dict), so the same data
+        parses the same way on either backend.
+        """
+        documents: list = []
+        if isinstance(raw, dict) and (
+            "output_text" in raw or "error_text" in raw
+        ):
+            output = raw.get("output_text") or ""
+            errors = raw.get("error_text") or ""
+            text = (
+                f"{output}\n{errors}" if output and errors else output + errors
+            )
+            for line in str(text).splitlines():
+                line = line.strip()
+                if line:
+                    documents.append(line)
+        elif isinstance(raw, (bytes, bytearray)):
+            for line in bytes(raw).decode("utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    documents.append(line)
+        elif isinstance(raw, str):
+            for line in raw.splitlines():
+                line = line.strip()
+                if line:
+                    documents.append(line)
+        elif isinstance(raw, list):
+            documents.extend(raw)
+        else:
+            return []
+        items: list[BatchItem] = []
+        for document in documents:
+            if isinstance(document, str):
+                try:
+                    parsed = json.loads(document)
+                except ValueError:
+                    continue
+            elif isinstance(document, dict):
+                parsed = document
+            else:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            if "result" in parsed:
+                item = _anthropic_batch_item(parsed, self.parse_response)
+            else:
+                item = _openai_batch_item(parsed, self.parse_response)
+            if item is not None:
+                items.append(item)
+        return items
