@@ -486,6 +486,77 @@ class TestSamples(unittest.TestCase):
                      "project-only.fcpxml"):
             self.assertEqual((first / name).read_bytes(), (second / name).read_bytes())
 
+    def _tiny_export_bytes(self, duration="2/25s", frame_duration="1/25s"):
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+            '<fcpxml version="1.14"><resources>'
+            '<format id="r1" frameDuration="%s" width="640" height="360"/>'
+            '<asset id="r1" name="Tiny clip" start="0s" duration="%s" '
+            'hasVideo="1" format="r1" hasAudio="1">'
+            '<media-rep kind="original-media" src="file:///example/tiny.mov"/>'
+            '</asset></resources><library><event name="Tiny event">'
+            '<asset-clip ref="r1" name="Tiny clip" start="0s" duration="%s" '
+            'format="r1"/></event></library></fcpxml>'
+            % (frame_duration, duration, duration)
+        )
+        return xml.encode("utf-8")
+
+    def test_project_only_rejects_two_frame_clips(self):
+        from tests import fcp_samples
+
+        two_frames = self._tiny_export_bytes("2/25s", "1/25s")
+        with self.assertRaises(ValueError):
+            fcp_samples.build_from_export(two_frames)
+        work = self.tmp / "two-frame.fcpxml"
+        work.write_bytes(two_frames)
+        out = self.tmp / "two-frame-run"
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = _run_main(
+                ["--output", str(out), "--from-export", str(work)])
+        self.assertEqual(code, 2)
+        self.assertFalse((out / "project-only.fcpxml").exists())
+        three_frames = self._tiny_export_bytes("3/25s", "1/25s")
+        samples = fcp_samples.build_from_export(three_frames)
+        root = ET.fromstring(samples["project-only"])
+        selects = [p for p in root.findall("project")
+                   if p.get("name") == "Check section selects"]
+        self.assertEqual(len(selects), 1)
+        spine = selects[0].find("sequence").find("spine")
+        items = [c for c in spine if c.tag == "asset-clip"]
+        self.assertEqual(len(items), 1)
+        source = _parse_time("3/25s")
+        select_dur = _parse_time(items[0].get("duration"))
+        self.assertGreater(select_dur, Fraction(0, 1))
+        self.assertLess(select_dur, source)
+        self.assertNotEqual(select_dur, source)
+
+    def test_media_xml_determinism(self):
+        self._require_media()
+        first = self.tmp / "media-det-a"
+        second = self.tmp / "media-det-b"
+        self.assertEqual(_run_main(["--output", str(first)]), 0)
+        self.assertEqual(_run_main(["--output", str(second)]), 0)
+        for name in ("full.fcpxml", "vo-spine.fcpxml"):
+            with self.subTest(sample=name):
+                first_bytes = (first / name).read_bytes()
+                second_bytes = (second / name).read_bytes()
+                first_norm = first_bytes.replace(
+                    first.resolve().as_uri().encode(),
+                    b"file:///OUTPUT-ROOT")
+                second_norm = second_bytes.replace(
+                    second.resolve().as_uri().encode(),
+                    b"file:///OUTPUT-ROOT")
+                self.assertEqual(first_norm, second_norm)
+        target = self.tmp / "media-det-same"
+        self.assertEqual(_run_main(["--output", str(target)]), 0)
+        before = {name: (target / name).read_bytes()
+                  for name in ("full.fcpxml", "vo-spine.fcpxml")}
+        shutil.rmtree(str(target))
+        self.assertEqual(_run_main(["--output", str(target)]), 0)
+        for name in ("full.fcpxml", "vo-spine.fcpxml"):
+            with self.subTest(sample="same-root-" + name):
+                self.assertEqual((target / name).read_bytes(), before[name])
+
     def _snapshot(self, folder):
         folder = Path(folder)
         return {p.name: (p.stat().st_size, p.stat().st_mtime_ns)

@@ -1,9 +1,11 @@
 # Final Cut hand checks
 
 These five samples are built by the check-sample generator for hand
-checks inside Final Cut Pro. The generator only writes files. It never
-opens Final Cut Pro, never scripts it, and never touches a real library,
-event, export, or media folder. The editor does every import and every
+checks inside Final Cut Pro. The generator only writes files into the
+new output folder. It never opens Final Cut Pro and never scripts it.
+For the export-based samples it reads the provided export file (or the
+bundle's Info.fcpxml) but never modifies that export and never reads the
+media files the export references. The editor does every import and every
 check by hand and records what they see.
 
 Samples built from a real event export stay on the editor's Mac. They
@@ -11,7 +13,10 @@ are never committed to the repository. Only the synthetic media-run
 files and the committed sanitized fixture may be shared.
 
 Build commands use placeholder folders. Pick a new empty folder outside
-the repository checkout for each run.
+the repository checkout for each run. Media samples embed that output
+folder as file:// URIs, so their XML bytes are identical only for runs
+into the same output folder; to compare runs in different folders,
+replace the output-folder URI with a placeholder first.
 
 ## Full capture sample (full.fcpxml)
 
@@ -102,8 +107,11 @@ added items.
 What it holds: two top-level projects built from the export's own
 browser clips, with no library and no events. Check rough cut plays
 each browser clip back to back from zero. Check section selects plays
-a shorter inner range of each clip back to back from zero. Resources
-carry over only the used assets and formats.
+a shorter inner range of each clip back to back from zero. Every section
+select is non-empty and strictly shorter than its source clip. Exports
+with any browser video clip of two source frames or fewer are refused
+with a clear error instead. Resources carry over only the used assets
+and formats.
 
 Build it: same command as the control sample above.
 

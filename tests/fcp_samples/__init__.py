@@ -653,7 +653,24 @@ def _annotate_first_clips(root):
                 first.insert(at + shift, element)
 
 
+def _short_clip_reason(clips):
+    """Return a refusal reason when a clip cannot yield a shorter select."""
+    for info in clips:
+        if info["duration"] <= 2 * info["frame_dur"]:
+            return (
+                "clip %r is two source frames or fewer "
+                "(duration %s with frame duration %s); "
+                "section selects need more than two source frames"
+                % (info["name"], _fmt_time(info["duration"]),
+                   _fmt_time(info["frame_dur"]))
+            )
+    return None
+
+
 def _build_project_only(root, clips):
+    reason = _short_clip_reason(clips)
+    if reason is not None:
+        raise ValueError(reason)
     version = root.get("version") or "1.14"
     out = ET.Element("fcpxml", {"version": version})
     resources = ET.SubElement(out, "resources")
@@ -724,12 +741,8 @@ def _build_project_only(root, clips):
     offset = Fraction(0, 1)
     select_items = []
     for info in clips:
-        if info["duration"] > 2 * info["frame_dur"]:
-            sub_start = info["start"] + info["frame_dur"]
-            sub_dur = _fit_duration(info["duration"] - 2 * info["frame_dur"], seq_fd)
-        else:
-            sub_start = info["start"]
-            sub_dur = _fit_duration(info["duration"], seq_fd)
+        sub_start = info["start"] + info["frame_dur"]
+        sub_dur = _fit_duration(info["duration"] - 2 * info["frame_dur"], seq_fd)
         select_items.append((sub_start, sub_dur))
     select_total = sum((dur for _, dur in select_items), Fraction(0, 1))
     select_seq = ET.SubElement(selects, "sequence", {
@@ -806,9 +819,10 @@ def _check_export_bytes(data):
         return "export XML does not parse"
     if root.tag != "fcpxml":
         return "export root is not fcpxml"
-    if not _browser_video_clips(root):
+    clips = _browser_video_clips(root)
+    if not clips:
         return "export has no browser video clip"
-    return None
+    return _short_clip_reason(clips)
 
 
 def _run_media_mode(output):
