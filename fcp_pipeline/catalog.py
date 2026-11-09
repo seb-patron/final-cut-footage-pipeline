@@ -323,9 +323,11 @@ def _open_connection(path: str | Path, *, read_only: bool = False) -> sqlite3.Co
 def _probe_version(db_path: Path) -> tuple[str, int | None]:
     """Read the schema version through a read-only connection.
 
-    Returns ``("missing" | "empty" | "unversioned" | "ok", version)`` where
-    the version is only set for ``"ok"``. The read-only connection writes
-    nothing: no journal, no new file.
+    Returns ``("empty" | "unversioned" | "ok", version)`` where the version
+    is only set for ``"ok"``. The read-only connection writes nothing: no
+    journal, no new file. Every version row is read: a non-empty database
+    with zero rows, more than one row, a non-integer value or a value
+    newer than :data:`SCHEMA_VERSION` raises :class:`CatalogError`.
     """
     connection = _open_connection(db_path, read_only=True)
     try:
@@ -339,19 +341,99 @@ def _probe_version(db_path: Path) -> tuple[str, int | None]:
             return ("empty", None)
         if "schema_version" not in names:
             return ("unversioned", None)
-        row = connection.execute("SELECT version FROM schema_version").fetchone()
-        if row is None:
+        rows = connection.execute("SELECT version FROM schema_version").fetchall()
+        if len(rows) == 0:
             raise CatalogError(
                 f"bad catalog at {db_path}: schema_version holds no row"
             )
-        version = row[0]
+        if len(rows) > 1:
+            raise CatalogError(
+                f"bad catalog at {db_path}: schema_version holds "
+                f"{len(rows)} rows, expected exactly one"
+            )
+        version = rows[0][0]
         if isinstance(version, bool) or not isinstance(version, int):
             raise CatalogError(
                 f"bad catalog at {db_path}: schema version {version!r} is not an int"
             )
+        if version > SCHEMA_VERSION:
+            raise CatalogError(
+                f"bad catalog at {db_path}: schema version {version} is "
+                f"newer than this catalog code's version {SCHEMA_VERSION}; "
+                "the file was left untouched"
+            )
         return ("ok", version)
     finally:
         connection.close()
+
+
+def _verify_post_open_paths(
+    pipeline: Path, db_path: Path, project: Path
+) -> None:
+    """Re-check the catalog paths after SQLite has opened the database.
+
+    A shortcut swapped in between the pre-open checks and the open itself
+    is refused here: ``.pipeline`` must still be a real directory (never a
+    symlink, checked with :func:`os.lstat`) resolving to the project's own
+    ``.pipeline/`` folder, and the database file must still be a regular
+    non-symlink file resolving inside it. Raises :class:`SafeWriteError`
+    without deleting anything.
+    """
+    try:
+        pipeline_stat = os.lstat(pipeline)
+    except FileNotFoundError:
+        raise SafeWriteError(
+            f"refused to open catalog in {pipeline}: .pipeline is missing "
+            "after open (the catalog lives only in the project's own "
+            ".pipeline/ folder)"
+        ) from None
+    except NotADirectoryError:
+        raise SafeWriteError(
+            f"refused to open catalog in {pipeline}: .pipeline is "
+            "not a folder"
+        ) from None
+    if stat_module.S_ISLNK(pipeline_stat.st_mode):
+        raise SafeWriteError(
+            f"refused to open catalog in {pipeline}: .pipeline is a "
+            "symlink (the catalog lives only in the project's own "
+            ".pipeline/ folder)"
+        )
+    if not stat_module.S_ISDIR(pipeline_stat.st_mode):
+        raise SafeWriteError(
+            f"refused to open catalog in {pipeline}: .pipeline exists "
+            "and is not a folder"
+        )
+    resolved_pipeline = pipeline.resolve()
+    if (
+        resolved_pipeline != project / _PIPELINE_DIRNAME
+        or not resolved_pipeline.is_relative_to(project)
+    ):
+        raise SafeWriteError(
+            f"refused to open catalog in {pipeline}: .pipeline resolves to "
+            f"{resolved_pipeline}, not the project's own .pipeline/ folder"
+        )
+    if os.path.islink(db_path):
+        raise SafeWriteError(
+            f"refused to open catalog at {db_path}: the catalog file "
+            "is a symlink (it must be a regular file)"
+        )
+    try:
+        db_stat = os.lstat(db_path)
+    except FileNotFoundError:
+        raise SafeWriteError(
+            f"refused to open catalog at {db_path}: the catalog file is "
+            "missing after open"
+        ) from None
+    if not stat_module.S_ISREG(db_stat.st_mode):
+        raise SafeWriteError(
+            f"refused to open catalog at {db_path}: the catalog file "
+            "is not a regular file"
+        )
+    if not db_path.resolve().is_relative_to(resolved_pipeline):
+        raise SafeWriteError(
+            f"refused to open catalog at {db_path}: the catalog file "
+            f"resolves outside the project's own .pipeline/ folder"
+        )
 
 
 # -- the catalog ------------------------------------------------------
@@ -380,7 +462,9 @@ class Catalog:
         volumes a caller hands in to protect. Every path check below runs
         before SQLite opens anything, and any refusal raises
         :class:`SafeWriteError` leaving nothing behind: no ``.pipeline/``
-        folder, no file.
+        folder, no file. After SQLite opens, the ``.pipeline/`` folder and
+        the database file are checked again; a post-open refusal closes the
+        connection and never deletes anything.
         """
         project_abs = Path(os.path.abspath(os.fspath(settings.folder)))
         project = project_abs.resolve()
@@ -490,6 +574,11 @@ class Catalog:
                     "the file was left untouched"
                 )
             connection = _open_connection(db_path)
+            try:
+                _verify_post_open_paths(pipeline, db_path, project)
+            except Exception:
+                connection.close()
+                raise
             catalog = cls(connection, db_path, version or SCHEMA_VERSION)
             try:
                 if state == "empty":
@@ -506,6 +595,11 @@ class Catalog:
                 "(nothing was created)"
             )
         connection = _open_connection(db_path)
+        try:
+            _verify_post_open_paths(pipeline, db_path, project)
+        except Exception:
+            connection.close()
+            raise
         catalog = cls(connection, db_path, SCHEMA_VERSION)
         try:
             catalog._create_fresh()
@@ -538,7 +632,7 @@ class Catalog:
             for statement in _fresh_statements():
                 self._connection.execute(statement)
             self._connection.execute(
-                "INSERT INTO schema_version (version) VALUES (?)",
+                "INSERT INTO schema_version (id, version) VALUES (1, ?)",
                 (SCHEMA_VERSION,),
             )
             self._connection.commit()
@@ -548,7 +642,17 @@ class Catalog:
         self._schema_version = SCHEMA_VERSION
 
     def _upgrade(self, version: int) -> None:
-        """Upgrade one older version to the current schema in one transaction."""
+        """Upgrade one older version to the current schema in one transaction.
+
+        A version newer than :data:`SCHEMA_VERSION` is refused before any
+        write, so migration never rewrites a newer file.
+        """
+        if version > SCHEMA_VERSION:
+            raise CatalogError(
+                f"bad catalog at {self._path}: schema version {version} is "
+                f"newer than this catalog code's version {SCHEMA_VERSION}; "
+                "the file was left untouched"
+            )
         upgrades = _upgrades()
         try:
             self._connection.execute("BEGIN IMMEDIATE")

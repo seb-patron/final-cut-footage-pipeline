@@ -1,6 +1,7 @@
 """Tests for fcp_pipeline.catalog, the project's catalog database."""
 
 import csv
+import hashlib
 import io
 import os
 import sqlite3
@@ -10,6 +11,7 @@ import tempfile
 import unittest
 from fractions import Fraction
 from pathlib import Path
+from unittest import mock
 
 from fcp_pipeline.catalog import (
     ASSETS_TSV_COLUMNS,
@@ -268,6 +270,78 @@ class TestCatalog(unittest.TestCase):
             self.assertEqual(db_path.read_bytes(), before_bytes)
             self.assertEqual(os.stat(db_path).st_mtime_ns, before_mtime)
             self.assertEqual(sorted(os.listdir(pipeline)), ["catalog.sqlite"])
+
+    def make_version_fixture(self, tmp: Path, versions):
+        """Build a project whose database holds only crafted version rows."""
+        settings, places = self.make_project(tmp)
+        pipeline = places["project"] / ".pipeline"
+        pipeline.mkdir()
+        db_path = pipeline / "catalog.sqlite"
+        connection = sqlite3.connect(os.fspath(db_path))
+        try:
+            connection.execute(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL)"
+            )
+            for version in versions:
+                connection.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (version,),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+        return settings, db_path
+
+    def test_refuses_two_version_rows(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, db_path = self.make_version_fixture(tmp, [1, 99])
+            before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+            with self.assertRaises(CatalogError):
+                Catalog.open(settings)
+            self.assertEqual(
+                hashlib.sha256(db_path.read_bytes()).hexdigest(), before
+            )
+
+    def test_refuses_duplicate_version_rows(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, db_path = self.make_version_fixture(tmp, [1, 1])
+            before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+            with self.assertRaises(CatalogError):
+                Catalog.open(settings)
+            self.assertEqual(
+                hashlib.sha256(db_path.read_bytes()).hexdigest(), before
+            )
+
+    def test_refuses_text_version(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, db_path = self.make_version_fixture(tmp, ["v2"])
+            before = hashlib.sha256(db_path.read_bytes()).hexdigest()
+            with self.assertRaises(CatalogError) as caught:
+                Catalog.open(settings)
+            self.assertIn("v2", str(caught.exception))
+            self.assertEqual(
+                hashlib.sha256(db_path.read_bytes()).hexdigest(), before
+            )
+
+    def test_schema_version_holds_one_row(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, _ = self.make_project(tmp)
+            with Catalog.open(settings) as catalog:
+                with self.assertRaises(sqlite3.IntegrityError):
+                    catalog._connection.execute(
+                        "INSERT INTO schema_version (version) VALUES (99)"
+                    )
+                catalog._connection.rollback()
+                self.assertEqual(
+                    catalog._connection.execute(
+                        "SELECT COUNT(*) FROM schema_version"
+                    ).fetchone()[0],
+                    1,
+                )
 
     def test_refuses_bad_values_and_foreign_files(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -675,6 +749,75 @@ class TestCatalog(unittest.TestCase):
                     os.path.lexists(project / ".pipeline" / "catalog.sqlite")
                 )
                 self.assertFalse(os.path.lexists(other / "catalog.sqlite"))
+
+    def test_refuses_pipeline_swapped_before_connect(self):
+        import fcp_pipeline.catalog as catalog_module
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, places = self.make_project(tmp)
+            project = places["project"]
+            pipeline = project / ".pipeline"
+            with Catalog.open(settings):
+                pass
+            db_path = pipeline / "catalog.sqlite"
+            self.assertTrue(db_path.is_file())
+            real_bytes = db_path.read_bytes()
+            decoy = tmp / "decoy-footage"
+            decoy.mkdir()
+            (decoy / "clip-a.mov").write_bytes(b"decoy-bytes-a")
+            (decoy / "clip-b.mov").write_bytes(b"decoy-bytes-b")
+
+            def snapshot(folder: Path):
+                return {
+                    entry.name: (
+                        entry.stat().st_size,
+                        hashlib.sha256(entry.read_bytes()).hexdigest(),
+                    )
+                    for entry in sorted(folder.iterdir())
+                    if entry.is_file() and not entry.is_symlink()
+                }
+
+            before = snapshot(decoy)
+            self.assertEqual(len(before), 2)
+            real_connect = catalog_module.sqlite3.connect
+            swapped = []
+            backup = project / ".pipeline-real"
+
+            def swapping_connect(*args, **kwargs):
+                if kwargs.get("uri"):
+                    return real_connect(*args, **kwargs)
+                if not swapped:
+                    os.rename(pipeline, backup)
+                    pipeline.symlink_to(decoy, target_is_directory=True)
+                    swapped.append(True)
+                return real_connect(*args, **kwargs)
+
+            try:
+                with mock.patch.object(
+                    catalog_module.sqlite3,
+                    "connect",
+                    side_effect=swapping_connect,
+                ):
+                    with self.assertRaises(SafeWriteError):
+                        Catalog.open(settings)
+            finally:
+                if pipeline.is_symlink():
+                    pipeline.unlink()
+                if backup.is_dir() and not pipeline.exists():
+                    os.rename(backup, pipeline)
+            self.assertTrue(swapped, "the .pipeline swap never happened")
+            self.assertTrue(
+                (decoy / "catalog.sqlite").is_file(),
+                "the refused open never reached the swapped folder",
+            )
+            after = snapshot(decoy)
+            self.assertEqual(
+                {name: after[name] for name in before},
+                before,
+                "pre-existing decoy files changed",
+            )
+            self.assertEqual(db_path.read_bytes(), real_bytes)
 
     def test_refuses_protected_overlap(self):
         cases = (

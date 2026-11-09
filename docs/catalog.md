@@ -88,6 +88,11 @@ leaves nothing behind: no `.pipeline/` folder, no file.
   volumes handed in with the open, and anything inside a Final Cut bundle
   folder (a folder whose name ends in `.fcpbundle`).
 
+A shortcut deliberately swapped in between the checks and the open can
+still leave an empty catalog file behind before the post-open check
+refuses it. This matches the threat model in `docs/safe-writes.md`, where
+a swap racing the open calls themselves is out of scope.
+
 SQLite's own side file while writing lives next to the database inside
 `.pipeline/`, temporary tables stay in memory, and the catalog writes
 nowhere else.
