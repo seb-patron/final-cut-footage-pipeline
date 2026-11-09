@@ -39,6 +39,16 @@ TRANSCRIPT_WORDS = 300
 MAX_SHEET_SIZE = (1536, 864)
 #: Most values kept per vocabulary folder; the first in sorted order win.
 MAX_VOCABULARY_VALUES = 200
+#: Largest absolute value any AI answer number may carry. Times are
+#: seconds within one clip and confidences run 0 to 1, so anything
+#: wider is not a real measurement. Wider integers are rejected before
+#: float conversion (which would raise OverflowError) and floats are
+#: checked before scaling to milliseconds (which would overflow).
+_MAX_ANSWER_NUMBER = 1_000_000
+#: Longest free-text value the vocabulary takes from the "Slate"
+#: folder. Slate values are sentences a person wrote or that vision
+#: read off the picture; only short ones work as repeatable labels.
+_MAX_SLATE_VOCAB_CHARS = 80
 #: Whole-clip folders written by this step.
 SHOT_FOLDER = "shot"
 NOTE_FOLDER = "note"
@@ -223,12 +233,15 @@ def build_vocabulary(
     """Return ``folder -> sorted values`` shown to the model.
 
     The vocabulary holds the ``name`` of every places entry that is a
-    table with a non-empty string name (folder ``"place"``), the
-    distinct non-empty camera values in the catalog (folder
-    ``"gear"``), the distinct ``(folder, value)`` of every existing
-    catalog tag whose source is not ``"ai"`` and whose folder is not
-    one this step owns, and the optional ``extra`` mapping of folder
-    to string values. Each folder keeps at most
+    table with a non-empty string name (folder ``"Place"``, the same
+    name the days_places step writes), the distinct non-empty camera
+    values in the catalog (folder ``"Gear"``), the distinct
+    ``(folder, value)`` of every existing catalog tag whose source is
+    not ``"ai"`` and whose folder is not one this step owns, and the
+    optional ``extra`` mapping of folder to string values. The
+    ``"Slate"`` folder only contributes short values (at most
+    :data:`_MAX_SLATE_VOCAB_CHARS` characters); its longer free text
+    never enters the vocabulary. Each folder keeps at most
     :data:`MAX_VOCABULARY_VALUES` values, the first in sorted order.
     """
     folders: dict[str, set[str]] = {}
@@ -237,12 +250,12 @@ def build_vocabulary(
             continue
         name = entry.get("name")
         if isinstance(name, str) and name:
-            folders.setdefault("place", set()).add(name)
+            folders.setdefault("Place", set()).add(name)
     rows = catalog.list_media()  # type: ignore[union-attr]
     for row in rows:
         camera = getattr(row, "camera", None)
         if isinstance(camera, str) and camera:
-            folders.setdefault("gear", set()).add(camera)
+            folders.setdefault("Gear", set()).add(camera)
     for row in rows:
         for tag in catalog.list_tags(row.id):  # type: ignore[union-attr]
             folder = getattr(tag, "folder", None)
@@ -252,6 +265,11 @@ def build_vocabulary(
             if getattr(tag, "source", None) == "ai":
                 continue
             if folder in _OWN_FOLDERS:
+                continue
+            if (
+                folder == "Slate"
+                and len(value) > _MAX_SLATE_VOCAB_CHARS
+            ):
                 continue
             folders.setdefault(folder, set()).add(value)
     if extra is not None:
@@ -430,6 +448,37 @@ def _manifest_edges(manifest: dict, duration: Fraction) -> list[Fraction]:
     return sorted(edges)
 
 
+def _answer_number(value: object, number: int, label: str) -> float | None:
+    """Return an answer number as a float safe to scale to milliseconds.
+
+    Booleans, non-numbers and non-finite floats return ``None``: the
+    caller drops that range with a note. Integers and finite floats
+    wider than :data:`_MAX_ANSWER_NUMBER` are never real clip times
+    or confidences, so they raise :class:`ai.AiAnswerError` instead,
+    rejecting the whole answer the way a schema mismatch does. The
+    bound is checked before any float conversion or multiplication,
+    so a huge integer can never raise OverflowError and a huge float
+    can never overflow to infinity when scaled.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, int):
+        if abs(value) > _MAX_ANSWER_NUMBER:
+            raise ai.AiAnswerError(
+                f"AI answer for step {STEP!r} failed checks: "
+                f"range {number}: invalid answer ({label} out of range)"
+            )
+        return float(value)
+    if not math.isfinite(value):
+        return None
+    if abs(value) > _MAX_ANSWER_NUMBER:
+        raise ai.AiAnswerError(
+            f"AI answer for step {STEP!r} failed checks: "
+            f"range {number}: invalid answer ({label} out of range)"
+        )
+    return value
+
+
 def check_answer(
     answer: dict,
     vocabulary: dict[str, tuple[str, ...]],
@@ -442,8 +491,11 @@ def check_answer(
     with exact :class:`Fraction` times already snapped outwards to the
     tile edges and deduplicated by ``(folder, start, duration)``
     (higher confidence wins, first wins a tie). Every drop appends one
-    note naming the range number or the tag and the rule. Nothing here
-    is retried: only a schema-failing answer is retried, inside ask.
+    note naming the range number or the tag and the rule. A number too
+    huge to be a real time or confidence raises
+    :class:`ai.AiAnswerError`, rejecting the whole answer the way a
+    schema mismatch does. Nothing here is retried: only a
+    schema-failing answer is retried, inside ask.
     """
     kept: list[tuple[str, str, float, Fraction, Fraction]] = []
     notes: list[str] = []
@@ -455,27 +507,17 @@ def check_answer(
         if not isinstance(entry, dict):
             notes.append(f"range {number}: dropped (not a range)")
             continue
-        confidence = entry.get("confidence")
-        if (
-            isinstance(confidence, bool)
-            or not isinstance(confidence, (int, float))
-            or not math.isfinite(confidence)
-            or not 0 <= confidence <= 1
-        ):
+        confidence = _answer_number(
+            entry.get("confidence"), number, "confidence"
+        )
+        if confidence is None or not 0 <= confidence <= 1:
             notes.append(
                 f"range {number}: dropped (confidence out of range)"
             )
             continue
-        start_raw = entry.get("start")
-        end_raw = entry.get("end")
-        if (
-            isinstance(start_raw, bool)
-            or isinstance(end_raw, bool)
-            or not isinstance(start_raw, (int, float))
-            or not isinstance(end_raw, (int, float))
-            or not math.isfinite(start_raw)
-            or not math.isfinite(end_raw)
-        ):
+        start_raw = _answer_number(entry.get("start"), number, "start")
+        end_raw = _answer_number(entry.get("end"), number, "end")
+        if start_raw is None or end_raw is None:
             notes.append(f"range {number}: dropped (outside the clip)")
             continue
         start = Fraction(round(start_raw * 1000), 1000)
@@ -756,7 +798,12 @@ def _tag_one_clip(
             path=path, asset_id=asset_id, status="failed", reason=str(exc)
         )
     edges = _manifest_edges(manifest, duration)
-    kept, check_notes = check_answer(answer, vocabulary, duration, edges)
+    try:
+        kept, check_notes = check_answer(answer, vocabulary, duration, edges)
+    except ai.AiAnswerError as exc:
+        return TagEntry(
+            path=path, asset_id=asset_id, status="failed", reason=str(exc)
+        )
     notes.extend(check_notes)
     records: list[object] = []
     for folder, value, confidence, start, span in kept:

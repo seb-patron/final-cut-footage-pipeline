@@ -259,6 +259,14 @@ class TestTag(unittest.TestCase):
             extra={"subject": ["invented-boat", "invented-gull"]},
         )
 
+    def legacy_vocabulary(self):
+        """Pin the lowercase folders the recorded fixtures were written against."""
+        return {
+            "place": ("Invented Cove",),
+            "gear": ("Invented Maker Cam A",),
+            "subject": ("invented-boat", "invented-gull"),
+        }
+
     def openai_text(self, request):
         """Return the instructions text of a recorded OpenAI request."""
         parts = request["input"][0]["content"]
@@ -483,7 +491,7 @@ class TestTag(unittest.TestCase):
             result = tag.tag_catalog(
                 catalog,
                 settings,
-                vocabulary=self.vocabulary(catalog, settings),
+                vocabulary=self.legacy_vocabulary(),
                 backends={"openai": fake},
             )
             self.assertEqual(result.tagged, 1)
@@ -644,7 +652,7 @@ class TestTag(unittest.TestCase):
             result = tag.tag_catalog(
                 catalog,
                 settings,
-                vocabulary=self.vocabulary(catalog, settings),
+                vocabulary=self.legacy_vocabulary(),
                 backends={"openai": fake},
             )
             self.assertEqual(result.tagged, 1)
@@ -682,6 +690,140 @@ class TestTag(unittest.TestCase):
                 )
             )
 
+    def test_huge_answer_numbers_rejected_as_invalid(self):
+        cases = {
+            "huge int start": (10**4000, 2.0, 0.8),
+            "huge float start": (1e308, 2.0, 0.8),
+            "huge int confidence": (1.0, 2.0, 10**4000),
+        }
+        for label, (start, end, confidence) in cases.items():
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    settings, footage, _ = self.make_project(tmp)
+                    catalog = self.open_catalog(settings)
+                    media_id, _ = self.add_clip(
+                        catalog, footage, "cove-a.mov", "clip-a"
+                    )
+                    self.write_sheet(settings, catalog, media_id)
+                    answer = {
+                        "description": "Invented cove survey",
+                        "shot": "wide",
+                        "ranges": [
+                            {
+                                "start": start,
+                                "end": end,
+                                "tags": [
+                                    {
+                                        "folder": "subject",
+                                        "value": "invented-boat",
+                                    }
+                                ],
+                                "confidence": confidence,
+                            }
+                        ],
+                        "problems": [],
+                        "outline_hint": None,
+                    }
+                    gate = net.NetworkGate(settings, "tag")
+                    fake = FakeOpenAI(gate, [openai_raw(answer)])
+                    result = tag.tag_catalog(
+                        catalog,
+                        settings,
+                        vocabulary=self.vocabulary(catalog, settings),
+                        backends={"openai": fake},
+                    )
+                    self.assertEqual(result.tagged, 0)
+                    self.assertEqual(result.failed, 1)
+                    entry = result.entries[0]
+                    self.assertEqual(entry.status, "failed")
+                    self.assertIn("invalid answer", entry.reason)
+                    self.assertEqual(catalog.list_tags(media_id), [])
+
+    def test_vocabulary_uses_day_place_gear_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, footage, _ = self.make_project(tmp)
+            catalog = self.open_catalog(settings)
+            media_a, _ = self.add_clip(catalog, footage, "cove-a.mov", "clip-a")
+            media_b, _ = self.add_clip(catalog, footage, "cove-b.mov", "clip-b")
+            long_slate = "slate line " * 30
+            self.assertGreater(len(long_slate), tag._MAX_SLATE_VOCAB_CHARS)
+            self.assertTrue(
+                catalog.put_tag(
+                    TagRecord(
+                        media_id=media_a,
+                        folder="Slate",
+                        value=long_slate,
+                        start=None,
+                        duration=None,
+                        source="slate",
+                        confidence=None,
+                        status="plain",
+                    )
+                )
+            )
+            self.assertTrue(
+                catalog.put_tag(
+                    TagRecord(
+                        media_id=media_a,
+                        folder="Day",
+                        value="Day 1",
+                        start=None,
+                        duration=None,
+                        source="metadata",
+                        confidence=None,
+                        status="plain",
+                    )
+                )
+            )
+            self.assertTrue(
+                catalog.put_tag(
+                    TagRecord(
+                        media_id=media_b,
+                        folder="Slate",
+                        value="Harbor sign",
+                        start=None,
+                        duration=None,
+                        source="slate",
+                        confidence=None,
+                        status="plain",
+                    )
+                )
+            )
+            vocabulary = tag.build_vocabulary(catalog, settings)
+            self.assertEqual(vocabulary["Place"], ("Invented Cove",))
+            self.assertEqual(vocabulary["Gear"], ("Invented Maker Cam A",))
+            self.assertEqual(vocabulary["Day"], ("Day 1",))
+            self.assertNotIn("place", vocabulary)
+            self.assertNotIn("gear", vocabulary)
+            self.assertIn("Harbor sign", vocabulary["Slate"])
+            for values in vocabulary.values():
+                self.assertNotIn(long_slate, values)
+
+    def test_ranges_not_a_list_is_a_note(self):
+        kept, notes = tag.check_answer(
+            {"ranges": "not-a-list"},
+            {"subject": ("invented-boat",)},
+            Fraction(60),
+            [Fraction(0), Fraction(60)],
+        )
+        self.assertEqual(kept, [])
+        self.assertEqual(notes, ["ranges: dropped (not a list of ranges)"])
+
+    def test_manifest_edges_clamp_out_of_range_tile_times(self):
+        manifest = {
+            "tiles": [
+                {"index": 0, "time": "10/1"},
+                {"index": 1, "time": "-5/1"},
+                {"index": 2, "time": "61/1"},
+                {"index": 3, "time": "not-a-number"},
+                {"index": 4, "time": "70/1"},
+            ]
+        }
+        self.assertEqual(
+            tag._manifest_edges(manifest, Fraction(60)),
+            [Fraction(0), Fraction(10), Fraction(60)],
+        )
+
     def test_times_snap_to_tile_edges(self):
         good = load_fixture("good-answer.json")
         with tempfile.TemporaryDirectory() as tmp:
@@ -694,7 +836,7 @@ class TestTag(unittest.TestCase):
             result = tag.tag_catalog(
                 catalog,
                 settings,
-                vocabulary=self.vocabulary(catalog, settings),
+                vocabulary=self.legacy_vocabulary(),
                 backends={"openai": fake},
             )
             self.assertEqual(result.tagged, 1)
@@ -1240,7 +1382,19 @@ class TestTag(unittest.TestCase):
             self.write_sheet(settings, catalog, media_id)
             self.add_transcript(catalog, media_id, tmp, "invented words here")
 
-            def snapshot():
+            def snapshot(folder):
+                found = {}
+                for root, _, files in os.walk(folder):
+                    for name in files:
+                        full = Path(root) / name
+                        info = os.stat(full)
+                        found[os.fspath(full.relative_to(tmp))] = (
+                            info.st_size,
+                            info.st_mtime_ns,
+                        )
+                return found
+
+            def snapshot_project():
                 found = {}
                 for root, dirs, files in os.walk(project):
                     dirs[:] = [
@@ -1255,7 +1409,12 @@ class TestTag(unittest.TestCase):
                         )
                 return found
 
-            before = snapshot()
+            transcripts = Path(tmp) / "transcripts"
+            before_footage = snapshot(footage)
+            before_transcripts = snapshot(transcripts)
+            before_project = snapshot_project()
+            self.assertTrue(before_footage)
+            self.assertTrue(before_transcripts)
             gate = net.NetworkGate(settings, "tag")
             fake = FakeOpenAI(gate, [openai_raw(good)])
             result = tag.tag_catalog(
@@ -1265,7 +1424,9 @@ class TestTag(unittest.TestCase):
                 backends={"openai": fake},
             )
             self.assertEqual(result.tagged, 1)
-            self.assertEqual(snapshot(), before)
+            self.assertEqual(snapshot(footage), before_footage)
+            self.assertEqual(snapshot(transcripts), before_transcripts)
+            self.assertEqual(snapshot_project(), before_project)
             for root, _, files in os.walk(project):
                 for name in files:
                     full = Path(root) / name

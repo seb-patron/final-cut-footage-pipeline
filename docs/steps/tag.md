@@ -128,12 +128,14 @@ scan is reported as stale; a clip with no sheet for its current state
 is reported with no sheet; both are left alone until the earlier steps
 run again.
 
-Exactly what is sent: one contact-sheet picture, one line of facts
-(camera, duration, day, place and capture time, leaving out whatever is
-unknown), the clip's slate text, the first 300 words of its transcript,
-and the list of allowed tags. What never is: footage, video,
-full-resolution frames, file names and paths. Only the sheet image is
-ever uploaded.
+Exactly what is sent: one contact-sheet picture plus prompt text built
+from catalog values (place names, camera names, existing tags, the
+clip's slate text and the first 300 words of its transcript after
+marker removal, and the allowed-tag list). The request never attaches
+local path or filename fields: no footage, video, full-resolution
+frames, file names or paths leave the machine. Only the sheet image is
+ever uploaded. Catalog text may itself contain words a person spoke or
+wrote, so treat the prompt text as carrying their words.
 
 The provider and model come from `[pipeline.ai.tag]` in `project.toml`,
 else the shared `[pipeline.ai]` values, OpenAI by default with Claude
