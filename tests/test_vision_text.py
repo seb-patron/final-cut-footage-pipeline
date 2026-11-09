@@ -11,9 +11,11 @@ _manifest_bytes, files written straight into the temporary
 placeholder sheet bytes (the recorded runner never reads them) and the
 Vision tests install the drawn JPEG. The recorded runner is a function
 that returns subprocess.CompletedProcess with the fixture case as JSON
-bytes and counts its calls. Tests that run the real helper are skipped
-through a shared decorator that raises unittest.SkipTest with
-vision_unavailable_reason(); they share one class-level cache_dir (a
+bytes and counts its calls. Tests that run the real helper are opt-in:
+they run only when FCP_RUN_VISION_TESTS=1 is set, and are skipped
+through a shared decorator that raises unittest.SkipTest naming that
+variable (or with vision_unavailable_reason() when Vision itself is
+missing); they share one class-level cache_dir (a
 TemporaryDirectory made in setUpClass and removed in tearDownClass) so
 only the first run compiles.
 
@@ -165,11 +167,19 @@ def recorded_runner(case_name, calls):
     return run
 
 
+#: Set to "1" to run the tests that execute the real Swift/Vision helper.
+VISION_LIVE_ENV = "FCP_RUN_VISION_TESTS"
+
+
 def requires_vision(func):
-    """Skip a real-Vision test with the availability reason when missing."""
+    """Skip a real-Vision test unless opted in and available."""
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        if os.environ.get(VISION_LIVE_ENV) != "1":
+            raise unittest.SkipTest(
+                "live Vision test: set FCP_RUN_VISION_TESTS=1 to run"
+            )
         reason = vision_text.vision_unavailable_reason()
         if reason is not None:
             raise unittest.SkipTest(reason)
@@ -521,6 +531,7 @@ class TestVisionParse(unittest.TestCase):
         good = [Fraction(10, 3), Fraction(10, 1)]
         bad_manifests = {
             "wrong version": manifest_document(good, version=2),
+            "version true": manifest_document(good, version=True),
             "grid [2, 2]": manifest_document(good, grid=[2, 2]),
             "tile_size [256, 144]": manifest_document(
                 good, tile_size=[256, 144]
@@ -532,6 +543,20 @@ class TestVisionParse(unittest.TestCase):
                 tiles=[
                     {"index": 1, "time": "10/3"},
                     {"index": 0, "time": "10/1"},
+                ],
+            ),
+            "index true": manifest_document(
+                good,
+                tiles=[
+                    {"index": 0, "time": "10/3"},
+                    {"index": True, "time": "10/1"},
+                ],
+            ),
+            "index false": manifest_document(
+                good,
+                tiles=[
+                    {"index": False, "time": "10/3"},
+                    {"index": 1, "time": "10/1"},
                 ],
             ),
             'time "0.5"': manifest_document(
@@ -568,6 +593,26 @@ class TestVisionParse(unittest.TestCase):
                     "engine": vision_text.ENGINE,
                     "revision": 3,
                     "tiles": CASES["full_slate"]["tiles"][:8],
+                }
+            ),
+            "index true": json.dumps(
+                {
+                    "engine": vision_text.ENGINE,
+                    "revision": 3,
+                    "tiles": [
+                        {"index": 0 if at != 1 else True, "lines": []}
+                        for at in range(9)
+                    ],
+                }
+            ),
+            "index false": json.dumps(
+                {
+                    "engine": vision_text.ENGINE,
+                    "revision": 3,
+                    "tiles": [
+                        {"index": at if at != 0 else False, "lines": []}
+                        for at in range(9)
+                    ],
                 }
             ),
             "confidence 1.5": json.dumps(

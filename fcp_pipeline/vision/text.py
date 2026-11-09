@@ -298,7 +298,11 @@ def parse_helper_output(text: object, tile_count: int) -> list[TileText]:
         )
     tiles: list[TileText] = []
     for position, entry in enumerate(raw_tiles):
-        if not isinstance(entry, dict) or entry.get("index") != position:
+        if (
+            not isinstance(entry, dict)
+            or type(entry.get("index")) is not int
+            or entry.get("index") != position
+        ):
             raise VisionError(
                 "bad Vision output: tiles are not exactly indexes "
                 f"0 to {tile_count - 1} in order "
@@ -433,7 +437,7 @@ def select_tiles(manifest: object) -> list[TileRef]:
         raise TileSelectionError(
             f"bad sheets manifest {manifest!r}: must be an object"
         )
-    if manifest.get("version") != 1:
+    if type(manifest.get("version")) is not int or manifest.get("version") != 1:
         raise TileSelectionError(
             f"bad sheets manifest version {manifest.get('version')!r}: "
             "expected 1"
@@ -465,7 +469,11 @@ def select_tiles(manifest: object) -> list[TileRef]:
         )
     refs: list[TileRef] = []
     for position, entry in enumerate(raw_tiles):
-        if not isinstance(entry, dict) or entry.get("index") != position:
+        if (
+            not isinstance(entry, dict)
+            or type(entry.get("index")) is not int
+            or entry.get("index") != position
+        ):
             raise TileSelectionError(
                 "bad sheets manifest tiles: index values are not "
                 f"0, 1, 2 ... in order (entry {position} is {entry!r})"

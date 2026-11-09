@@ -332,6 +332,17 @@ seconds longer while it builds its compiler cache in a temporary
 folder; each clip takes a fraction of a second after that. Off macOS
 the step says so and exits 3.
 
+The tests that run the real helper are opt-in, like the live AI tests:
+they are skipped unless `FCP_RUN_VISION_TESTS=1` is set (with macOS
+and `swift` available). To run them locally, from the repository root:
+
+```sh
+FCP_RUN_VISION_TESTS=1 python3 -m unittest tests.test_vision_text -v
+```
+
+All other vision tests (recorded OCR fixtures, tile selection,
+catalog writes) run everywhere with the normal suite.
+
 Tiles are 512 by 288 pixels, so small or blurry slate text may not be
 read. When nothing reads as a slate the step says nothing rather than
 guessing: the clip is listed as having no slate text and no tag is
