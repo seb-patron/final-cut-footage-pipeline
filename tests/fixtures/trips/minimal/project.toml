@@ -1,0 +1,18 @@
+name = "Harborlight Survey"
+timezone = "UTC"
+start_date = 2020-06-15
+
+[clock_offsets]
+harbor-cam-a = "-00:03:10"
+
+[[places]]
+name = "Gray Gull Cove"
+lat = 0.5
+lon = -140.25
+radius_m = 500
+
+[[places]]
+name = "Pelican Drift Anchorage"
+lat = -1.25
+lon = -139.75
+radius_m = 800
