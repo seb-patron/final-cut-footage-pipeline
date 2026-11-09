@@ -41,7 +41,7 @@ from fcp_pipeline.ai.audio_openai import (
     parse_transcription,
 )
 from fcp_pipeline.backends import whisper_local
-from fcp_pipeline.catalog import Catalog
+from fcp_pipeline.catalog import Catalog, CatalogError
 from fcp_pipeline.vo import (
     VoError,
     main,
@@ -492,6 +492,79 @@ class TestVo(unittest.TestCase):
                 )
                 self.assertTrue(second_path.exists())
                 self.assertEqual(saved_path.read_bytes(), before_bytes)
+
+    def test_abs_bound_times_refused(self):
+        values = [-(10**400), 10**400, -1e308, float("nan")]
+        for value in values:
+            label = repr(value)[:40]
+            with self.subTest(kind="word start", value=label):
+                document = copy.deepcopy(FIXTURE)
+                document["words"][2]["start"] = value
+                with self.assertRaises(AudioFormatError) as raised:
+                    parse_transcription(document, require_words=True)
+                self.assertIn("words[2].start", str(raised.exception))
+
+    def test_missing_catalog_row_repaired_from_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "media"
+            recording = self.make_recording(media)
+            trip = write_project(tmp, voiceover=recording, ai_extra=LOCAL_TOML)
+            settings = load_trip(trip)
+            with Catalog.open(settings) as catalog:
+                failing = make_local()
+                with mock.patch.object(
+                    catalog,
+                    "put_media",
+                    side_effect=CatalogError("invented catalog boom"),
+                ):
+                    first = transcribe_voiceover(
+                        catalog, settings, local_backend=failing
+                    )
+                (entry,) = first.entries
+                self.assertEqual(entry.status, "failed")
+                self.assertEqual(len(failing.calls), 1)
+                saved = sorted((trip / "transcripts").glob("*.json"))
+                self.assertEqual(len(saved), 1)
+                saved_path = saved[0]
+                before_bytes = saved_path.read_bytes()
+                before_mtime = os.stat(saved_path).st_mtime_ns
+                self.assertEqual(
+                    [
+                        row
+                        for row in catalog.list_media()
+                        if row.kind == "voiceover"
+                    ],
+                    [],
+                )
+                idle = make_local()
+                second = transcribe_voiceover(
+                    catalog, settings, local_backend=idle
+                )
+                (again,) = second.entries
+                self.assertEqual(again.status, "recorded")
+                self.assertEqual(idle.calls, [])
+                self.assertEqual(saved_path.read_bytes(), before_bytes)
+                self.assertEqual(
+                    os.stat(saved_path).st_mtime_ns, before_mtime
+                )
+                self.assertEqual(
+                    sorted((trip / "transcripts").glob("*.json")), [saved_path]
+                )
+                rows = [
+                    row
+                    for row in catalog.list_media()
+                    if row.kind == "voiceover"
+                ]
+                self.assertEqual(len(rows), 1)
+                transcripts = catalog.list_transcripts(rows[0].id)
+                self.assertEqual(len(transcripts), 1)
+                segments = catalog.list_transcript_segments(transcripts[0].id)
+                words = [
+                    word for segment in segments for word in segment.words
+                ]
+                self.assertEqual(
+                    [word.word for word in words], ["invented", "local"]
+                )
 
     def resolved_snapshot(self, root):
         """Map every resolve()d path under root to (size, mtime_ns)."""

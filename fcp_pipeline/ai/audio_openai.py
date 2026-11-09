@@ -114,16 +114,22 @@ def _segment_dict(raw: object, index: int) -> dict:
 def _checked_fraction(value: object, label: str) -> Fraction:
     """Turn a JSON number of seconds into an exact millisecond Fraction.
 
-    ``label`` names the key in refusal messages. A value larger than
-    :data:`MAX_SECONDS` is refused like a non-finite one; the bound is
-    checked on the raw value, before any float conversion or
-    multiplication, so a huge int never reaches ``float()``.
+    ``label`` names the key in refusal messages. A value whose absolute
+    value exceeds :data:`MAX_SECONDS` is refused like a non-finite one;
+    the bound is checked on the absolute raw value, before any float
+    conversion or ``math.isfinite`` call, so a huge int never reaches
+    ``float()``. Negative times are refused by the caller's
+    ``0 <= start <= end`` rule.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise AudioFormatError(
             f"{label}: must be a finite number of seconds"
         )
-    if value > MAX_SECONDS or not math.isfinite(value):
+    if abs(value) > MAX_SECONDS:
+        raise AudioFormatError(
+            f"{label}: must be a finite number of seconds"
+        )
+    if not math.isfinite(value):
         raise AudioFormatError(
             f"{label}: must be a finite number of seconds"
         )

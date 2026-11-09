@@ -13,7 +13,10 @@ transcription (the editor's own API credits) runs only when
 asking for word times. Word times are required: a hosted answer
 without them falls back to a local run, and a local answer without
 them fails that recording; no time is ever invented. A recording
-already done (same SHA-256) is skipped without any call. Nothing calls
+already done (same SHA-256) is skipped without any call; when the
+transcript file is there but the catalog has no row for it, the row is
+repaired from that validated file instead and reported as recorded.
+Nothing calls
 this step yet except its own command line; importing this module runs
 no tool, opens no database and reads no file.
 """
@@ -34,7 +37,13 @@ from pathlib import Path
 
 from fcp_pipeline.ai import AiConfigError, audio_openai, step_config
 from fcp_pipeline.backends import whisper_local
-from fcp_pipeline.catalog import Catalog, CatalogError, MediaRecord
+from fcp_pipeline.catalog import (
+    Catalog,
+    CatalogError,
+    MediaRecord,
+    TranscriptSegmentRecord,
+    TranscriptWordRecord,
+)
 from fcp_pipeline.memo import (
     MAX_JSON_BYTES,
     MAX_UPLOAD_BYTES,
@@ -93,6 +102,11 @@ class VoResult:
         return sum(1 for entry in self.entries if entry.status == "skipped")
 
     @property
+    def recorded(self) -> int:
+        """How many recordings regained their catalog row from file."""
+        return sum(1 for entry in self.entries if entry.status == "recorded")
+
+    @property
     def failed(self) -> int:
         """How many recordings failed without stopping the run."""
         return sum(1 for entry in self.entries if entry.status == "failed")
@@ -111,6 +125,8 @@ class VoResult:
             f"transcribed {self.transcribed}, skipped {self.skipped}, "
             f"failed {self.failed}"
         )
+        if self.recorded:
+            text += f", recorded {self.recorded}"
         if self.would_transcribe:
             text = f"would-transcribe {self.would_transcribe}, " + text
         return text
@@ -158,14 +174,20 @@ def recordings(settings) -> list[Path]:
     return paths
 
 
-def _already_done(settings, digest: str) -> bool:
-    """Whether a voiceover file directly in ``transcripts/`` holds this SHA-256."""
+def _find_done_file(settings, digest: str):
+    """Return the done voiceover file holding this SHA-256, or None.
+
+    The result is ``(path, blob, document)``: the file's path string,
+    its raw bytes, and its parsed JSON document. Only a file directly
+    in ``transcripts/`` whose role is ``"voiceover"`` and whose
+    recording SHA-256 matches counts; anything else is ignored.
+    """
     folder = Path(os.fspath(settings.transcripts))
     try:
         names = os.listdir(folder)
     except OSError:
-        return False
-    for name in names:
+        return None
+    for name in sorted(names):
         if not name.endswith(".json"):
             continue
         candidate = folder / name
@@ -177,7 +199,8 @@ def _already_done(settings, digest: str) -> bool:
             if os.path.getsize(candidate) > MAX_JSON_BYTES:
                 continue
             with open(candidate, "rb") as handle:
-                document = json.loads(handle.read().decode("utf-8"))
+                blob = handle.read()
+            document = json.loads(blob.decode("utf-8"))
         except (OSError, ValueError):
             continue
         if not isinstance(document, dict):
@@ -189,8 +212,180 @@ def _already_done(settings, digest: str) -> bool:
             continue
         sha = recording.get("sha256")
         if isinstance(sha, str) and sha == digest:
-            return True
-    return False
+            return (os.fspath(candidate), bytes(blob), document)
+    return None
+
+
+def _already_done(settings, digest: str) -> bool:
+    """Whether a voiceover file directly in ``transcripts/`` holds this SHA-256."""
+    return _find_done_file(settings, digest) is not None
+
+
+def _checked_file_time(value: object) -> Fraction | None:
+    """Millisecond Fraction for a transcript-file time, or None if bad.
+
+    The absolute bound is checked before any float conversion or
+    ``math.isfinite`` call, so a huge int never reaches ``float()``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if abs(value) > audio_openai.MAX_SECONDS:
+        return None
+    if not math.isfinite(value):
+        return None
+    if value < 0:
+        return None
+    return Fraction(int(round(float(value) * 1000)), 1000)
+
+
+def _repair_records(document: object):
+    """Build catalog segment records from a done-file document.
+
+    Returns the records, or None when the document is not a valid
+    voiceover transcript (wrong shape, bad times, or no words).
+    """
+    if not isinstance(document, dict):
+        return None
+    segments_raw = document.get("segments")
+    if not isinstance(segments_raw, list) or not segments_raw:
+        return None
+    if not isinstance(document.get("engine"), str) or not document.get(
+        "engine"
+    ):
+        return None
+    if not isinstance(document.get("model"), str) or not document.get("model"):
+        return None
+    language = document.get("language")
+    if language is not None and not isinstance(language, str):
+        return None
+    records = []
+    total = 0
+    for index, item in enumerate(segments_raw):
+        if not isinstance(item, dict):
+            return None
+        start = _checked_file_time(item.get("start"))
+        stop = _checked_file_time(item.get("end"))
+        if start is None or stop is None or not start <= stop:
+            return None
+        text = item.get("text")
+        if not isinstance(text, str):
+            return None
+        words_raw = item.get("words")
+        if not isinstance(words_raw, list):
+            return None
+        words = []
+        for word_index, entry in enumerate(words_raw):
+            if not isinstance(entry, dict):
+                return None
+            word = entry.get("word")
+            if not isinstance(word, str) or not word.strip():
+                return None
+            word_start = _checked_file_time(entry.get("start"))
+            word_stop = _checked_file_time(entry.get("end"))
+            if word_start is None or word_stop is None:
+                return None
+            if not word_start <= word_stop:
+                return None
+            probability = entry.get("probability")
+            if probability is not None:
+                if isinstance(probability, bool) or not isinstance(
+                    probability, (int, float)
+                ):
+                    return None
+                if not 0 <= probability <= 1:
+                    return None
+                probability = float(probability)
+                if not math.isfinite(probability):
+                    return None
+            words.append(
+                TranscriptWordRecord(
+                    idx=word_index,
+                    start=word_start,
+                    stop=word_stop,
+                    word=word.strip(),
+                    probability=probability,
+                )
+            )
+        total += len(words)
+        records.append(
+            TranscriptSegmentRecord(
+                idx=index, start=start, stop=stop, text=text, words=words
+            )
+        )
+    if total < 1:
+        return None
+    return records
+
+
+def _repair_missing_row(catalog: Catalog, settings, text, digest, found,
+                        created: str | None = None):
+    """Record the catalog row for an existing done-file, or skip.
+
+    When the catalog already holds a row for the file, returns a
+    ``"skipped"`` entry. Otherwise validates the file and inserts its
+    catalog row without touching the file, returning a ``"recorded"``
+    entry; an invalid file or a refused insert returns ``"failed"``.
+    """
+    name = Path(text).name
+    path_text, blob, document = found
+    try:
+        media = catalog.get_media(os.path.abspath(text))
+    except CatalogError:
+        media = None
+    file_sha = hashlib.sha256(bytes(blob)).hexdigest()
+    if media is not None and getattr(media, "kind", None) == "voiceover":
+        try:
+            transcripts = catalog.list_transcripts(media.id)
+        except (CatalogError, OSError, ValueError):
+            transcripts = []
+        for transcript in transcripts:
+            if transcript.path == path_text or transcript.sha256 == file_sha:
+                return VoEntry(name=name, status="skipped")
+    records = _repair_records(document)
+    if records is None:
+        return VoEntry(
+            name=name,
+            status="failed",
+            reason="the existing transcript file is invalid",
+        )
+    try:
+        info = os.stat(text)
+    except OSError as exc:
+        return VoEntry(name=name, status="failed", reason=str(exc))
+    language = document.get("language")
+    engine = document.get("engine")
+    model = document.get("model")
+    asset = "vo-" + hashlib.sha256(
+        os.fspath(Path(text).resolve()).encode("utf-8")
+    ).hexdigest()[:16]
+    try:
+        media_id = catalog.put_media(
+            MediaRecord(
+                asset_id=asset,
+                kind="voiceover",
+                path=os.path.abspath(text),
+                size=info.st_size,
+                mtime_ns=info.st_mtime_ns,
+                inode=info.st_ino,
+            )
+        )
+        catalog.add_transcript_set(
+            media_id,
+            files=[(path_text, file_sha)],
+            language=language,
+            engine=f"{engine}:{model}",
+            created=created or _utcnow(),
+            segments=records,
+        )
+    except (CatalogError, SafeWriteError, OSError) as exc:
+        return VoEntry(
+            name=name,
+            status="failed",
+            reason=str(exc) or type(exc).__name__,
+        )
+    return VoEntry(
+        name=name, status="recorded", engine=engine, file=path_text
+    )
 
 
 def _inside_output(settings, path_text: str) -> bool:
@@ -326,7 +521,9 @@ def transcribe_voiceover(
     ``"recording not found"``; a recording inside the pipeline-written
     folders is ``"failed"`` with
     ``"recording is inside the project's output folders"``. A recording
-    whose SHA-256 already sits in a voiceover file is ``"skipped"``.
+    whose SHA-256 already sits in a voiceover file is ``"skipped"``;
+    when that file's catalog row is missing the row is repaired from
+    the validated file and the entry is ``"recorded"`` instead.
     With ``dry_run`` the entry is ``"would-transcribe"`` and nothing
     else happens. Provider ``"local"`` transcribes locally; provider
     ``"openai"`` calls the hosted transcription through the network
@@ -449,8 +646,14 @@ def _transcribe_one(
             VoEntry(name=name, status="failed", reason=str(exc)),
             prompt,
         )
-    if _already_done(settings, digest):
-        return (VoEntry(name=name, status="skipped"), prompt)
+    found = _find_done_file(settings, digest)
+    if found is not None:
+        return (
+            _repair_missing_row(
+                catalog, settings, text, digest, found, created
+            ),
+            prompt,
+        )
 
     notes: list[str] = []
     engine: str | None = None
