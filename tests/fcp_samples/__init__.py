@@ -653,8 +653,29 @@ def _annotate_first_clips(root):
                 first.insert(at + shift, element)
 
 
+def _select_duration(start, duration, clip_fd, seq_fd, rough_dur):
+    """Return the section-select duration, or None when the grids cannot fit it.
+
+    The source range gives up one clip frame at each end and the
+    timeline duration is aligned down to the sequence grid; the result
+    must stay non-empty and strictly shorter than the rough duration.
+    """
+    remainder = duration - 2 * clip_fd
+    if remainder <= 0:
+        return None
+    fitted = (remainder // seq_fd) * seq_fd
+    select = min(fitted, rough_dur - seq_fd)
+    if select < seq_fd:
+        return None
+    # Invariant guard: select <= fitted <= remainder, so this never fires.
+    if start + clip_fd + select > start + duration:
+        return None
+    return select
+
+
 def _short_clip_reason(clips):
     """Return a refusal reason when a clip cannot yield a shorter select."""
+    seq_fd = clips[0]["frame_dur"] if clips else None
     for info in clips:
         if info["duration"] <= 2 * info["frame_dur"]:
             return (
@@ -663,6 +684,18 @@ def _short_clip_reason(clips):
                 "section selects need more than two source frames"
                 % (info["name"], _fmt_time(info["duration"]),
                    _fmt_time(info["frame_dur"]))
+            )
+        rough_dur = _fit_duration(info["duration"], seq_fd)
+        if _select_duration(info["start"], info["duration"],
+                            info["frame_dur"], seq_fd, rough_dur) is None:
+            return (
+                "clip %r cannot fit a section select on both frame grids "
+                "(duration %s at frame duration %s with sequence frame "
+                "duration %s); section selects need a non-empty range "
+                "strictly shorter than the source on both the clip and "
+                "sequence grids"
+                % (info["name"], _fmt_time(info["duration"]),
+                   _fmt_time(info["frame_dur"]), _fmt_time(seq_fd))
             )
     return None
 
@@ -740,9 +773,10 @@ def _build_project_only(root, clips):
     selects = ET.SubElement(out, "project", {"name": "Check section selects"})
     offset = Fraction(0, 1)
     select_items = []
-    for info in clips:
+    for info, rough_dur in zip(clips, rough_durs):
         sub_start = info["start"] + info["frame_dur"]
-        sub_dur = _fit_duration(info["duration"] - 2 * info["frame_dur"], seq_fd)
+        sub_dur = _select_duration(info["start"], info["duration"],
+                                   info["frame_dur"], seq_fd, rough_dur)
         select_items.append((sub_start, sub_dur))
     select_total = sum((dur for _, dur in select_items), Fraction(0, 1))
     select_seq = ET.SubElement(selects, "sequence", {

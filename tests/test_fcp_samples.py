@@ -530,6 +530,90 @@ class TestSamples(unittest.TestCase):
         self.assertLess(select_dur, source)
         self.assertNotEqual(select_dur, source)
 
+    def _mixed_export_bytes(self, clips):
+        """Build an export from (asset, format, name, start, duration, frame_duration)."""
+        formats = []
+        seen = set()
+        for _, fid, _, _, _, frame_duration in clips:
+            if fid not in seen:
+                seen.add(fid)
+                formats.append(
+                    '<format id="%s" frameDuration="%s" width="640" '
+                    'height="360"/>' % (fid, frame_duration))
+        assets = "".join(
+            '<asset id="%s" name="%s" start="%s" duration="%s" '
+            'hasVideo="1" format="%s" hasAudio="1">'
+            '<media-rep kind="original-media" src="file:///example/%s.mov"/>'
+            "</asset>" % (aid, name, start, duration, fid, aid)
+            for aid, fid, name, start, duration, _ in clips)
+        browser = "".join(
+            '<asset-clip ref="%s" name="%s" start="%s" duration="%s" '
+            'format="%s"/>' % (aid, name, start, duration, fid)
+            for aid, fid, name, start, duration, _ in clips)
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+            '<fcpxml version="1.14"><resources>%s%s</resources>'
+            '<library><event name="Mixed event">%s</event></library></fcpxml>'
+            % ("".join(formats), assets, browser)).encode("utf-8")
+
+    def test_mixed_rate_selects_align_to_both_grids(self):
+        from tests import fcp_samples
+
+        first = ("a1", "f1", "First 25 fps clip", "0s", "1s", "1/25s")
+        fast = ("a2", "f2", "Fast 100 fps clip", "0s", "10/100s", "1/100s")
+        film = ("a3", "f3", "Film rate clip", "0s", "1001/200s", "1001/30000s")
+        slow = ("a4", "f4", "Slow 10 fps clip", "0s", "1s", "1/10s")
+        samples = fcp_samples.build_from_export(
+            self._mixed_export_bytes([first, fast, film, slow]))
+        root = ET.fromstring(samples["project-only"])
+        self._check_project_times(root)
+        projects = {p.get("name"): p for p in root.findall("project")}
+        rough = [c for c in projects["Check rough cut"].find("sequence").find("spine")
+                 if c.tag == "asset-clip"]
+        selects = [c for c in projects["Check section selects"].find("sequence").find("spine")
+                   if c.tag == "asset-clip"]
+        self.assertEqual([c.get("ref") for c in selects],
+                         [c.get("ref") for c in rough])
+        seq_fd = Fraction(1, 25)
+        sources = {aid: _parse_time(duration)
+                   for aid, _, _, _, duration, _ in (first, fast, film, slow)}
+        clip_fds = {aid: _parse_time(frame_duration)
+                    for aid, _, _, _, _, frame_duration in (first, fast, film, slow)}
+        for rclip, sclip in zip(rough, selects):
+            with self.subTest(clip=sclip.get("ref")):
+                source = sources[sclip.get("ref")]
+                clip_fd = clip_fds[sclip.get("ref")]
+                rstart = _parse_time(rclip.get("start", "0s"))
+                rdur = _parse_time(rclip.get("duration"))
+                sstart = _parse_time(sclip.get("start", "0s"))
+                sdur = _parse_time(sclip.get("duration"))
+                soff = _parse_time(sclip.get("offset", "0s"))
+                self.assertGreater(sdur, Fraction(0, 1))
+                self.assertLess(sdur, source)
+                self.assertLess(sdur, rdur)
+                self.assertEqual(sstart % clip_fd, 0)
+                self.assertEqual(sdur % seq_fd, 0)
+                self.assertEqual(soff % seq_fd, 0)
+                self.assertGreaterEqual(sstart, rstart)
+                self.assertLessEqual(sstart + sdur, rstart + rdur)
+                self.assertLessEqual(sstart + sdur, source)
+        probe = self._mixed_export_bytes([
+            first,
+            ("a2", "f2", "Three frame fast clip", "0s", "3/100s", "1/100s"),
+            film,
+        ])
+        with self.assertRaises(ValueError) as raised:
+            fcp_samples.build_from_export(probe)
+        self.assertIn("both frame grids", str(raised.exception))
+        work = self.tmp / "mixed-rate-probe.fcpxml"
+        work.write_bytes(probe)
+        out = self.tmp / "mixed-rate-probe-run"
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = _run_main(
+                ["--output", str(out), "--from-export", str(work)])
+        self.assertEqual(code, 2)
+        self.assertFalse((out / "project-only.fcpxml").exists())
+
     def test_media_xml_determinism(self):
         self._require_media()
         first = self.tmp / "media-det-a"
