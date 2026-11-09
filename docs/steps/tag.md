@@ -288,3 +288,73 @@ run stops before the first batch call.
 
 The side-by-side provider test and the pipeline command's `tag`
 subcommand come later.
+
+## Reading phone-screen slates (Apple Vision)
+
+Some slates are never spoken: the clip opens on a phone screen held up
+to the camera, showing the day, the place and the setup in writing.
+There is nothing to hear, so the contact sheet's pictures are read
+instead. Nothing calls this step yet; running it by hand looks like
+this:
+
+```
+python3 -m fcp_pipeline.vision.text --trip <folder>
+```
+
+What it reads is only the pictures the sheets step already saved under
+`.pipeline/sheets/`, never the footage. Each tile of a clip's sheet is
+passed to a small Swift helper that runs Apple's accurate text reader
+on that tile alone.
+
+What counts as a slate is the same reading the spoken-slate step uses:
+the word "Slate" followed by a day, shot, stock or camera. Other text
+on screen stores nothing: a street sign, an app's buttons or an
+ordinary sentence that happens to contain the word slate never become
+tags, because the tagging step sends slate text to its AI pass as the
+clip's slate and a wrong sentence there would mislead it.
+
+The keywords it makes are Day, Place, Shot, Stock and Camera, plus the
+slate text itself, all as whole-clip tags marked as read by Vision. A
+spoken slate, a callout, a metadata or GPS tag, the editor's own tags
+and anything locked or deleted always win over a Vision tag, while an
+AI tag does not: a Vision reading replaces it. A part the reader cannot match to
+the trip's own words is kept as read and marked "check", so an editor
+can confirm it later.
+
+A one-line example: a tile showing "SLATE DAY 3 B-ROLL" becomes Day
+"Day 3", Shot "B-roll" and the slate text "DAY 3. B-ROLL". "Day N" is
+split off from text after it on the same line, so "SLATE DAY 3 B-ROLL"
+reads as two pieces even without a comma or full stop between them.
+
+How it runs: the helper is run with the `swift` command, so macOS with
+Xcode or the Command Line Tools is needed. The first run takes a few
+seconds longer while it builds its compiler cache in a temporary
+folder; each clip takes a fraction of a second after that. Off macOS
+the step says so and exits 3.
+
+The tests that run the real helper are opt-in, like the live AI tests:
+they are skipped unless `FCP_RUN_VISION_TESTS=1` is set (with macOS
+and `swift` available). To run them locally, from the repository root:
+
+```sh
+FCP_RUN_VISION_TESTS=1 python3 -m unittest tests.test_vision_text -v
+```
+
+All other vision tests (recorded OCR fixtures, tile selection,
+catalog writes) run everywhere with the normal suite.
+
+Tiles are 512 by 288 pixels, so small or blurry slate text may not be
+read. When nothing reads as a slate the step says nothing rather than
+guessing: the clip is listed as having no slate text and no tag is
+stored. A failed read is an error, never "no text".
+
+It runs fully on the Mac, uploads nothing, uses no network, writes
+only catalog rows, and never opens, launches or scripts Final Cut Pro
+or Motion. The command prints one line per problem clip and a summary
+line such as `tagged 2, no-slate 1, no-sheet 0, stale 0, failed 0`:
+
+- `0`: the run completed (stale, no-sheet, no-slate and failed clips
+  do not fail it).
+- `1`: the trip or catalog could not be read, or Vision itself failed.
+- `2`: the command was used wrongly (the `--trip` folder is required).
+- `3`: Apple Vision is not available here (not macOS or no `swift`).
