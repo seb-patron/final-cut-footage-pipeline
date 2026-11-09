@@ -340,7 +340,7 @@ class TestAi(unittest.TestCase):
             r"chatgpt-",
             r"['\"]o[134]['\"]",
             r"whisper-1",
-            r"-transcribe",
+            r"(gpt|4o|mini|audio)[a-z0-9.-]*-transcribe",
             r"claude-(opus|sonnet|haiku|instant|[0-9])",
         ]
         package = REPO_ROOT / "fcp_pipeline"
@@ -356,6 +356,13 @@ class TestAi(unittest.TestCase):
             for pattern in patterns:
                 with self.subTest(path=str(path), pattern=pattern):
                     self.assertNotRegex(text, pattern)
+        narrowed = r"(gpt|4o|mini|audio)[a-z0-9.-]*-transcribe"
+        with self.subTest(pattern=narrowed, case="gpt-4o-transcribe"):
+            self.assertRegex("gpt-4o-transcribe", narrowed)
+        with self.subTest(pattern=narrowed, case="gpt-4o-mini-transcribe"):
+            self.assertRegex("gpt-4o-mini-transcribe", narrowed)
+        with self.subTest(pattern=narrowed, case="would-transcribe"):
+            self.assertNotRegex("would-transcribe", narrowed)
 
     def test_same_schema_both_backends(self):
         good_text = json.dumps(GOOD_ANSWER)
