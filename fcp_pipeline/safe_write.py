@@ -247,26 +247,57 @@ class SafeWriter:
                         top = value
         return top
 
+    def _check_lock_path(self, lock: Path) -> None:
+        """Refuse a number-lock path that escapes the project's ``.pipeline/``.
+
+        Runs before the lock file is created or opened, so a refusal
+        leaves nothing behind. The resolved lock must sit directly inside
+        the project's ``.pipeline/`` and must pass every target rule
+        (protected media / Final Cut / card paths, ``*.fcpbundle`` parts
+        and the pipeline-owned-folders check), exactly like a write target.
+        """
+        resolved = lock.resolve()
+        if resolved.parent != self._pipeline:
+            raise SafeWriteError(
+                f"refused lock file at {lock}: resolved to {resolved}, "
+                "which is outside the project's .pipeline/ "
+                "(the number lock must sit inside .pipeline/)"
+            )
+        self._check_target(resolved, lock, 0)
+
     def _take_number_lock(self):
-        """Exclusive flock on a ``.pipeline/`` lock file (best effort).
+        """Exclusive flock on the ``.pipeline/`` lock file (mandatory).
 
         The lock serialises number choice across processes; the exclusive
-        hard link stays the final guard either way. Returns None when
-        locking is unavailable, in which case link-and-retry still keeps
-        racing writers on distinct numbers.
+        hard link stays the final guard as well. Raises
+        :class:`SafeWriteError` without handing out a number when the lock
+        path is unsafe or the lock cannot be taken: numbering never
+        proceeds without the lock.
         """
+        lock = self._pipeline / _LOCK_FILENAME
+        self._check_lock_path(lock)
         if fcntl is None:
-            return None
+            raise SafeWriteError(
+                "refused numbered output in edit/: exclusive locking is "
+                f"unavailable, so no number can be handed out safely "
+                f"(lock file {lock})"
+            )
         try:
             self._pipeline.mkdir(parents=True, exist_ok=True)
-            handle = open(os.fspath(self._pipeline / _LOCK_FILENAME), "ab")  # noqa: PTH123
+            self._check_lock_path(lock)
+            handle = open(os.fspath(lock), "ab")  # noqa: PTH123
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        except OSError:
+        except SafeWriteError:
+            raise
+        except OSError as exc:
             try:
                 handle.close()  # type: ignore[possibly-undefined]
             except (OSError, NameError):
                 pass
-            return None
+            raise SafeWriteError(
+                f"refused numbered output in edit/: could not lock {lock} "
+                f"({exc}); nothing was written"
+            ) from exc
         return handle
 
     @staticmethod
@@ -320,7 +351,12 @@ class SafeWriter:
         return final
 
     def write_numbered(self, name, data) -> Path:
-        """Write ``edit/NNN-<name>`` with the next free number; never reuse one."""
+        """Write ``edit/NNN-<name>`` with the next free number; never reuse one.
+
+        The number lock is mandatory: when its path is unsafe or the lock
+        cannot be taken, this raises :class:`SafeWriteError` and writes
+        nothing.
+        """
         if (
             not isinstance(name, str)
             or not name
@@ -341,6 +377,7 @@ class SafeWriter:
         self._check_target(provisional.resolve(), provisional, size)
         if self._dry_run:
             with self._guard:
+                self._check_lock_path(self._pipeline / _LOCK_FILENAME)
                 number = max(self._scan_max_number(), self._planned_max_number()) + 1
                 if number > _MAX_NUMBER:
                     raise SafeWriteError(
@@ -364,6 +401,11 @@ class SafeWriter:
                 return final
         with self._guard:
             handle = self._take_number_lock()
+            if handle is None:
+                raise SafeWriteError(
+                    "refused numbered output in edit/: exclusive number "
+                    "lock was unavailable; nothing was written"
+                )
             try:
                 tried = self._scan_max_number()
                 while tried < _MAX_NUMBER:

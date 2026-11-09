@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fcp_pipeline.safe_write import (
     MAX_COMMITTED_BYTES,
@@ -333,6 +334,54 @@ class TestSafeWrite(unittest.TestCase):
                         self.assertEqual(snapshot_tree(Path(root)), before)
                         if mode == "dry-run":
                             self.assertEqual(writer.planned, [])
+
+    def test_numbered_refuses_when_pipeline_is_symlinked_into_footage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            places = self.make_trip(Path(tmp))
+            project = places["project"]
+            footage = places["footage"]
+            os.symlink(footage, project / ".pipeline")
+            before = snapshot_tree(footage)
+            with self.assertRaises(SafeWriteError) as raised:
+                places["writer"].write_numbered("cut.fcpxml", b"data")
+            self.assertIn("refused lock file", str(raised.exception))
+            self.assertFalse(os.path.lexists(footage / "safe-write.lock"))
+            self.assertEqual(snapshot_tree(footage), before)
+            self.assertFalse(os.path.lexists(project / "edit" / "001-cut.fcpxml"))
+
+    def test_numbered_fails_closed_without_lock(self):
+        cases = (
+            ("flock OSError", "flock"),
+            ("locking unavailable", "no-fcntl"),
+        )
+        for label, mode in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    places = self.make_trip(Path(tmp))
+                    writer = places["writer"]
+                    project = places["project"]
+                    if mode == "flock":
+                        patcher = mock.patch(
+                            "fcp_pipeline.safe_write.fcntl.flock",
+                            side_effect=OSError("lock boom"),
+                        )
+                    else:
+                        patcher = mock.patch(
+                            "fcp_pipeline.safe_write.fcntl", None
+                        )
+                    with patcher:
+                        with self.assertRaises(SafeWriteError):
+                            writer.write_numbered("cut.fcpxml", b"data")
+                    edit = project / "edit"
+                    self.assertEqual(
+                        list(edit.iterdir()) if edit.exists() else [], []
+                    )
+                    if mode == "no-fcntl":
+                        self.assertFalse(
+                            os.path.lexists(
+                                project / ".pipeline" / "safe-write.lock"
+                            )
+                        )
 
     def test_numbered_names_and_limits(self):
         with tempfile.TemporaryDirectory() as tmp:

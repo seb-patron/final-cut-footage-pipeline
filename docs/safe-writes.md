@@ -40,6 +40,16 @@ Files in `edit/` get the next free three-digit number: with
 pipeline runs writing at the same time never get the same number, and the
 bytes of existing files never change. Numbering stops at 999.
 
+Numbering takes an exclusive lock on `.pipeline/safe-write.lock` first.
+That lock path is checked against every rule above before the lock file
+is created or opened: it must resolve to inside the project's own
+`.pipeline/` folder, so a `.pipeline/` shortcut pointing into media, a
+Final Cut library, or anywhere else outside `.pipeline/` makes the write
+a refusal that leaves nothing behind. When the lock cannot be taken, or
+exclusive locking is unavailable at all, the numbered write is refused
+with an error and nothing is written: numbering never proceeds without
+the lock.
+
 ## Size cap
 
 Files bigger than 5,000,000 bytes (5 MB) are refused everywhere except
