@@ -70,11 +70,28 @@ Columns, in order:
 An example line (fields separated by tabs):
 
 ```text
-2026-01-02T03:04:05Z	scan	openai	gpt-4o-mini	1 image 412 KB, 1,840 characters	sent
+2026-01-02T03:04:05Z	scan	openai	<model-id>	1 image 412 KB, 1,840 characters	sent
 ```
 
 Request text, response text, and passwords never go in the log. Only
 counts and sizes do.
+
+## The AI usage log: tokens and cost, never words
+
+Every AI call that gets an answer appends one row to
+`.pipeline/ai-usage.tsv` inside the trip folder, through the same
+hardened writer as the network log (directory-relative opens, regular
+files only, the `.pipeline` re-check). The header,
+`time	step	provider	model	input_tokens	output_tokens	cost_usd`,
+is written once, and the file is only ever appended to, never rewritten.
+
+The row records when the call happened in UTC (for example
+`2020-06-15T08:30:00Z`), which step and provider and model answered,
+both token counts, and the cost in US dollars from the
+`[pipeline.ai.prices]` table. It never holds prompt text, answer text,
+image bytes, model internals, or keys. A call that raises adds no row; a
+refused usage write keeps the answer and emits exactly one warning
+naming the log problem instead.
 
 ## Threat model: a single-user tool on your own Mac
 

@@ -26,7 +26,7 @@ python3 footage_keywords.py --help
 python3 -m unittest discover -v
 ```
 
-No Python packages are required. Install FFmpeg separately only if using visual sampling. Final Cut Pro is required only for native export/import validation. Keep your own project inputs, source media, transcripts, proposals and review packets outside this repository.
+No Python packages are required. Install FFmpeg separately only if using visual sampling. AI steps additionally need the optional openai and anthropic packages (`pip install openai anthropic`) and an API key from the environment or the Keychain; see [docs/ai-providers.md](docs/ai-providers.md). Final Cut Pro is required only for native export/import validation. Keep your own project inputs, source media, transcripts, proposals and review packets outside this repository.
 
 ## Input contract
 
@@ -127,7 +127,7 @@ Validate an exported candidate against the installed DTD and use a dedicated syn
 
 This is a clean source snapshot with independent history. No private repository history, real footage, project transcripts, native library databases or personal project evidence is distributed. Runtime proposal/audit files contain absolute source paths and may contain transcripts, so treat them as private. Do not post them publicly without reviewing and redacting their contents.
 
-The prototype commands make no network requests. The pipeline package reaches the network only through its network gate: `offline = true` in `[pipeline]` or `--offline` refuses every call before connecting, and every call is logged to `.pipeline/network-log.tsv` with kinds and sizes, never content. See [docs/privacy.md](docs/privacy.md). FFmpeg and Apple Vision are invoked locally. There is no automatic import or live-library access. The tool's approval flags are a local review convention, not an access-control boundary.
+The prototype commands make no network requests. The pipeline package reaches the network only through its network gate: `offline = true` in `[pipeline]` or `--offline` refuses every call before connecting, and every call is logged to `.pipeline/network-log.tsv` with kinds and sizes, never content. AI steps need the optional openai and anthropic packages and an API key from the environment or the Keychain; see [docs/ai-providers.md](docs/ai-providers.md) and [docs/privacy.md](docs/privacy.md). FFmpeg and Apple Vision are invoked locally. There is no automatic import or live-library access. The tool's approval flags are a local review convention, not an access-control boundary.
 
 ## License
 
