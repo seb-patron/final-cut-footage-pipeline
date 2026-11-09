@@ -15,7 +15,7 @@ This is more than keywording, but it is not yet an end-to-end transcription or v
 
 ## Requirements and setup
 
-Python 3.10+ (standard library only), macOS with Swift/Apple Vision, and FFmpeg. Existing local Whisper output is required for transcript proposals; this tool does not install or rerun Whisper. The input contract supports CSVs prepared from local Whisper output with word timestamps. No external service is needed. Apple Vision may require an authorized execution context with CoreVideo access; a restricted sandbox failed with `Failed to create CVPixelBufferPool`. Do not interpret that as an empty classification.
+Python 3.11+ (tomllib; standard library only), macOS with Swift/Apple Vision, and FFmpeg. Existing local Whisper output is required for transcript proposals; this tool does not install or rerun Whisper. The input contract supports CSVs prepared from local Whisper output with word timestamps. No external service is needed. Apple Vision may require an authorized execution context with CoreVideo access; a restricted sandbox failed with `Failed to create CVPixelBufferPool`. Do not interpret that as an empty classification.
 
 Clone the public repository, then run commands from its root:
 
@@ -90,6 +90,18 @@ xmllint --noout --dtdvalid 'file:///Applications/Final%20Cut%20Pro.app/Contents/
 7. Review the structural diff and audit. Approval flags are a local workflow, **not** tamper-proof signatures. Binding verifies export-file freshness against its recorded snapshot, **not** whether someone changed the live native library after export. Always coordinate exclusive UI access and obtain a new export if native state may have changed. The CLI has no live-library access or import command; no production import is authorized by this tool.
 8. Only in the explicitly authorized validation target, import and inspect the matching-items dialog. **Replace is replacement, not an additive database update.** Keep Both may create duplicates and is not tested. Do not suppress warnings. Re-export and compare event/clip counts, source UID/URI, start/duration, annotations and existing metadata. Do not assume the experiment authorizes production replacement.
 
+## Pipeline commands
+
+The `fcp_pipeline` package is a skeleton: the steps exist as named stubs and do no work yet.
+
+```sh
+python3 -m fcp_pipeline --help
+```
+
+Main-path steps in order: scan, pull, transcribe, tag, photos, memo, organize, patch, export, roughcut; then ingest (optional); then run. Every step takes `--trip <folder>` (required) and `--dry-run`. An unbuilt step reads and writes nothing, prints `<step>: not built yet` to stderr and exits 3, with or without `--dry-run`. `run --trip <folder> [--dry-run]` calls the built main-path steps in registry order, skips the unbuilt ones, never runs ingest, and exits 3 with `run: no steps built yet` while no main-path step is built. The prototype commands (`footage_keywords.py`, `sample_vision.py`) keep working.
+
+Each trip folder holds a `project.toml` following the editor's project layout contract (see `tests/fixtures/trips/minimal/project.toml`): top-level `title`, with `status`, `created`, `dates` and `youtube` accepted but unused; `[final_cut]` records `library` and `events`; `[media]` records `footage`, `photos` and `assets` (all recorded as given, never created or checked); the pipeline-owned `[pipeline]` table holds `timezone`, `start_date` (a TOML local date, `YYYY-MM-DD`), `clock_offsets` and `places`. Pipeline keys at the top level are rejected, and unknown keys warn once.
+
 ## Tests
 
 ```sh
@@ -97,7 +109,7 @@ python3 -m unittest discover -v
 python3 -m py_compile footage_keywords.py sample_vision.py
 ```
 
-The 60-test suite covers nonzero source origins, semantic deduplication, no truncation, XML encoding/entity rejection, approval reset, source/export staleness, retiming/sidecar rejection and atomic publication failures/races. Tests use synthetic data and temporary files, never personal footage.
+The test suite covers nonzero source origins, semantic deduplication, no truncation, XML encoding/entity rejection, approval reset, source/export staleness, retiming/sidecar rejection and atomic publication failures/races. Tests use synthetic data and temporary files, never personal footage.
 
 The committed [synthetic test library seed](tests/fixtures/metadata-preservation/) includes a 12-second generated blue frame/test tone and FCPXML with favorite/rejected ratings, keyword ranges, regular/to-do/chapter markers, notes, roles, collections, custom metadata and an untouched timeline. It contains no real footage. Materialize an importable seed with:
 

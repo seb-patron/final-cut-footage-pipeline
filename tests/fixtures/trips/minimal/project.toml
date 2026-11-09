@@ -1,0 +1,29 @@
+title = "Harborlight Survey"
+
+[final_cut]
+library = "/synthetic/libraries/Harborlight.fcpbundle"
+events = ["Harborlight Event"]
+
+[media]
+footage = ["/synthetic/media/harbor-clip-a.mov"]
+photos = ["/synthetic/media/harbor-photo-a.jpg"]
+assets = "/synthetic/media/assets"
+
+[pipeline]
+timezone = "UTC"
+start_date = 2020-06-15
+
+[pipeline.clock_offsets]
+harbor-cam-a = "-00:03:10"
+
+[[pipeline.places]]
+name = "Gray Gull Cove"
+lat = 0.5
+lon = -140.25
+radius_m = 500
+
+[[pipeline.places]]
+name = "Pelican Drift Anchorage"
+lat = -1.25
+lon = -139.75
+radius_m = 800
