@@ -54,8 +54,10 @@ swapped for a shortcut after the checks, the open itself is refused and
 nothing is created anywhere else. When the lock cannot be taken, or
 exclusive locking is unavailable at all, the numbered write is refused
 with an error and nothing is written: numbering never proceeds without
-the lock. A failed lock attempt removes only the lock file that attempt
-just created; a lock file that was already there is never removed. The lock is claimed atomically with `O_CREAT|O_EXCL`, so only the call whose exclusive open succeeded counts as the creator and a racing caller's lock is never removed. The lock is opened with `O_NONBLOCK` and refused unless it is a regular file, so a FIFO at the lock path fails promptly with an error instead of blocking forever.
+the lock. The lock file stays in `.pipeline/` by design and is never
+unlinked by any code path: it is created once with `O_CREAT|O_EXCL`
+(or opened if it already exists) and left in place permanently, which is
+harmless because `.pipeline/` is pipeline-owned and git-ignored. The lock is opened with `O_NONBLOCK` and refused unless it is a regular file, so a FIFO at the lock path fails promptly with an error instead of blocking forever.
 
 ## Threat model
 
@@ -64,9 +66,9 @@ above stop mistakes and stale configuration, not an attacker: a
 shortcut (symlink) anywhere in the path at open time, `..` or absolute
 paths escaping the project, overlap with a protected media or Final Cut
 root, overwriting an existing file, and two runs handing out the same
-number. A refused write never deletes or overwrites anything you had:
-the only thing ever removed is the lock file the same failed attempt
-just created. A shortcut swapped in before the lock is opened is
+number. A refused write never deletes or overwrites anything you had,
+and never removes the lock file: a failed lock attempt leaves the lock
+file in place. A shortcut swapped in before the lock is opened is
 refused, not followed. Only a swap racing the individual open calls
 themselves — landing after the last check inside a single system call —
 is out of scope; nothing above defends against that, and the docs do

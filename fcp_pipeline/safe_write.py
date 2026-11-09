@@ -282,8 +282,8 @@ class SafeWriter:
         :class:`SafeWriteError`. ``O_NONBLOCK`` is cleared before
         returning (locking is mandatory, so ``fcntl`` is always
         available here) so later behaviour is blocking as usual. The
-        descriptor is left open; the caller closes it (and, when this
-        call created it, removes it) on every path out.
+        descriptor is left open; the caller closes it on every path out.
+        The lock file itself is never unlinked.
         """
         try:
             st = os.fstat(fd)
@@ -319,9 +319,10 @@ class SafeWriter:
         and only then is the lock file claimed from that folder descriptor
         with ``O_CREAT | O_EXCL`` (retried a bounded number of times when
         a racing creator makes one attempt report a spurious ``ENOENT``).
-        Only an ``O_EXCL`` open that succeeds marks this call as the
-        creator; a lock file that already exists is opened without
-        ``O_CREAT`` and is never removed by this call. Every lock open
+        A lock file that already exists is opened without ``O_CREAT``.
+        The lock file is never unlinked by any code path: it is created
+        once and left in place permanently, which is harmless because
+        ``.pipeline/`` is pipeline-owned and git-ignored. Every lock open
         uses ``O_NOFOLLOW | O_NONBLOCK`` and the descriptor is refused
         unless ``fstat`` shows a regular file, so a FIFO (or any other
         non-regular file) at the lock path is refused promptly instead
@@ -330,8 +331,6 @@ class SafeWriter:
         outside ``.pipeline/``. Raises :class:`SafeWriteError`
         without handing out a number when the lock path is unsafe or the
         lock cannot be taken: numbering never proceeds without the lock.
-        A failed attempt removes only the lock file that attempt just
-        created; anything already on disk is left alone.
         """
         lock = self._pipeline / _LOCK_FILENAME
         self._check_lock_path(lock)
@@ -345,7 +344,6 @@ class SafeWriter:
         pipe_fd = None
         fd = None
         handle = None
-        created = False
         finished = False
         try:
             self._pipeline.mkdir(parents=True, exist_ok=True)
@@ -372,11 +370,9 @@ class SafeWriter:
                 )
             cloexec = getattr(os, "O_CLOEXEC", 0)
             for _ in range(_LOCK_OPEN_ATTEMPTS):
-                # Claim the lock atomically: only an O_CREAT|O_EXCL open
-                # that succeeds marks this call as the creator. A lock
-                # file that already exists (including one a racing
-                # caller created) is opened without O_CREAT, so this
-                # call never owns it and never removes it.
+                # Claim the lock atomically with O_CREAT|O_EXCL, or open
+                # the existing lock file without O_CREAT. The lock file
+                # is never unlinked by any code path.
                 try:
                     fd = os.open(
                         _LOCK_FILENAME,
@@ -407,7 +403,6 @@ class SafeWriter:
                         fd = None
                         continue
                     self._check_lock_fd(fd, lock)
-                    created = False
                     break
                 except FileNotFoundError:
                     # A racing creator can make this very open report
@@ -417,7 +412,6 @@ class SafeWriter:
                     # (ELOOP on a shortcut, EACCES, ...) fails at once.
                     fd = None
                     continue
-                created = True
                 self._check_lock_fd(fd, lock)
                 break
             if fd is None:
@@ -429,9 +423,8 @@ class SafeWriter:
             try:
                 handle = os.fdopen(fd, "ab")  # noqa: PTH123
             except OSError:
-                # Leave fd open: the finally block below closes it and,
-                # through _remove_own_lock, removes the lock file when
-                # (and only when) this call just created it.
+                # Leave fd open: the finally block below closes it. The
+                # lock file itself is never unlinked.
                 raise
             fd = None
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -445,63 +438,26 @@ class SafeWriter:
                 f"({exc}); nothing was written"
             ) from exc
         finally:
-            try:
-                if not finished and created and pipe_fd is not None:
-                    self._remove_own_lock(pipe_fd, handle, fd)
-            finally:
-                if root_fd is not None:
-                    try:
-                        os.close(root_fd)
-                    except OSError:
-                        pass
-                if pipe_fd is not None:
-                    try:
-                        os.close(pipe_fd)
-                    except OSError:
-                        pass
-                if fd is not None:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
-                if handle is not None and not finished:
-                    try:
-                        handle.close()
-                    except OSError:
-                        pass
-
-    @staticmethod
-    def _remove_own_lock(pipe_fd, handle, fd) -> None:
-        """Remove the lock file this call just created, and only that file.
-
-        The lock file is unlinked only when the path still names the very
-        file this call opened (same ``st_dev``/``st_ino``) and that entry
-        is a regular file: a pre-existing lock file, a shortcut, or
-        anything that changed under the path is left alone.
-        """
-        fileno = None
-        if handle is not None:
-            try:
-                fileno = handle.fileno()
-            except OSError:
-                fileno = None
-        if fileno is None:
-            fileno = fd
-        if fileno is None:
-            return
-        try:
-            ours = os.fstat(fileno)
-            there = os.stat(_LOCK_FILENAME, dir_fd=pipe_fd, follow_symlinks=False)
-        except OSError:
-            return
-        if (ours.st_dev, ours.st_ino) != (there.st_dev, there.st_ino):
-            return
-        if not stat.S_ISREG(there.st_mode):
-            return
-        try:
-            os.unlink(_LOCK_FILENAME, dir_fd=pipe_fd)
-        except OSError:
-            pass
+            if root_fd is not None:
+                try:
+                    os.close(root_fd)
+                except OSError:
+                    pass
+            if pipe_fd is not None:
+                try:
+                    os.close(pipe_fd)
+                except OSError:
+                    pass
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if handle is not None and not finished:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
 
     @staticmethod
     def _release_number_lock(handle) -> None:

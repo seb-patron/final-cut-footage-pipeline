@@ -406,7 +406,7 @@ class TestSafeWrite(unittest.TestCase):
             self.assertEqual([entry.name for entry in (project / ".pipeline").iterdir()], [])
             self.assertFalse(os.path.lexists(project / "edit" / "001-cut.fcpxml"))
 
-    def test_numbered_lock_failure_leaves_no_lock_file_behind(self):
+    def test_numbered_lock_failure_keeps_lock_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             places = self.make_trip(Path(tmp))
             writer = places["writer"]
@@ -418,12 +418,14 @@ class TestSafeWrite(unittest.TestCase):
             ):
                 with self.assertRaises(SafeWriteError):
                     writer.write_numbered("cut.fcpxml", b"data")
-            self.assertFalse(os.path.lexists(pipeline / "safe-write.lock"))
+            # The lock file is never unlinked: a failed attempt leaves the
+            # file it just created in place permanently.
+            self.assertTrue(os.path.lexists(pipeline / "safe-write.lock"))
             self.assertEqual(
                 [entry.name for entry in pipeline.iterdir()]
                 if pipeline.exists()
                 else [],
-                [],
+                ["safe-write.lock"],
             )
             edit = project / "edit"
             self.assertEqual(list(edit.iterdir()) if edit.exists() else [], [])
@@ -527,6 +529,133 @@ class TestSafeWrite(unittest.TestCase):
             self.assertEqual(final.name, "001-cut.fcpxml")
             self.assertEqual(final.read_bytes(), b"data")
             self.assertEqual(lock.read_bytes(), b"rival-lock")
+
+    def test_numbered_lock_file_persists_after_success_and_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            places = self.make_trip(Path(tmp))
+            writer = places["writer"]
+            project = places["project"]
+            lock = project / ".pipeline" / "safe-write.lock"
+            real_unlink = os.unlink
+            real_remove = os.remove
+            unlink_calls = []
+
+            def guard_unlink(path, *args, **kwargs):
+                text = os.fspath(path)
+                if os.path.basename(text) == "safe-write.lock":
+                    unlink_calls.append(text)
+                    raise AssertionError(
+                        "the lock file must never be unlinked"
+                    )
+                return real_unlink(path, *args, **kwargs)
+
+            def guard_remove(path, *args, **kwargs):
+                text = os.fspath(path)
+                if os.path.basename(text) == "safe-write.lock":
+                    unlink_calls.append(text)
+                    raise AssertionError(
+                        "the lock file must never be removed"
+                    )
+                return real_remove(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(os, "unlink", side_effect=guard_unlink),
+                mock.patch.object(os, "remove", side_effect=guard_remove),
+            ):
+                final = writer.write_numbered("cut.fcpxml", b"data")
+                self.assertEqual(final.name, "001-cut.fcpxml")
+                self.assertTrue(os.path.lexists(lock))
+                before = os.stat(lock)
+                with mock.patch(
+                    "fcp_pipeline.safe_write.fcntl.flock",
+                    side_effect=OSError("lock boom"),
+                ):
+                    with self.assertRaises(SafeWriteError):
+                        writer.write_numbered("cut.fcpxml", b"data")
+                self.assertTrue(os.path.lexists(lock))
+                after = os.stat(lock)
+                self.assertEqual(
+                    (before.st_dev, before.st_ino),
+                    (after.st_dev, after.st_ino),
+                )
+            self.assertEqual(unlink_calls, [])
+            edit = project / "edit"
+            self.assertEqual(
+                sorted(p.name for p in edit.iterdir()), ["001-cut.fcpxml"]
+            )
+
+    def test_numbered_flock_failure_keeps_single_lock_inode(self):
+        try:
+            import fcntl as system_fcntl
+        except ImportError:  # pragma: no cover - non-Unix platforms only.
+            self.skipTest("fcntl unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            places = self.make_trip(Path(tmp))
+            writer = places["writer"]
+            project = places["project"]
+            pipeline = project / ".pipeline"
+            pipeline.mkdir(parents=True, exist_ok=True)
+            lock = pipeline / "safe-write.lock"
+            real_flock = system_fcntl.flock
+            holder = {}
+
+            def failing_flock(fd, op):
+                if op == system_fcntl.LOCK_EX and not holder.get("armed"):
+                    holder["armed"] = True
+                    bfd = os.open(
+                        os.fspath(lock),
+                        os.O_WRONLY | os.O_NOFOLLOW,
+                    )
+                    try:
+                        real_flock(bfd, system_fcntl.LOCK_EX)
+                    except BaseException:
+                        os.close(bfd)
+                        raise
+                    holder["fd"] = bfd
+                    holder["st"] = os.fstat(bfd)
+                    raise OSError("lock boom")
+                return real_flock(fd, op)
+
+            with mock.patch(
+                "fcp_pipeline.safe_write.fcntl.flock",
+                side_effect=failing_flock,
+            ):
+                with self.assertRaises(SafeWriteError):
+                    writer.write_numbered("cut.fcpxml", b"data")
+            try:
+                # A created the lock, B holds flock on that inode, and A's
+                # flock failed: the file must still name B's inode so a
+                # later writer locks the same file instead of numbering
+                # concurrently on a fresh inode.
+                self.assertTrue(os.path.lexists(lock))
+                now = os.stat(os.fspath(lock), follow_symlinks=False)
+                self.assertIn("fd", holder)
+                self.assertEqual(
+                    (now.st_dev, now.st_ino),
+                    (holder["st"].st_dev, holder["st"].st_ino),
+                )
+                probe = os.open(
+                    os.fspath(lock), os.O_WRONLY | os.O_NOFOLLOW
+                )
+                try:
+                    with self.assertRaises(OSError):
+                        real_flock(
+                            probe,
+                            system_fcntl.LOCK_EX | system_fcntl.LOCK_NB,
+                        )
+                finally:
+                    os.close(probe)
+                edit = project / "edit"
+                self.assertEqual(
+                    list(edit.iterdir()) if edit.exists() else [], []
+                )
+            finally:
+                bfd = holder.get("fd")
+                if bfd is not None:
+                    try:
+                        real_flock(bfd, system_fcntl.LOCK_UN)
+                    finally:
+                        os.close(bfd)
 
     def test_numbered_fifo_lock_is_refused_promptly(self):
         with tempfile.TemporaryDirectory() as tmp:
