@@ -45,10 +45,32 @@ That lock path is checked against every rule above before the lock file
 is created or opened: it must resolve to inside the project's own
 `.pipeline/` folder, so a `.pipeline/` shortcut pointing into media, a
 Final Cut library, or anywhere else outside `.pipeline/` makes the write
-a refusal that leaves nothing behind. When the lock cannot be taken, or
+a refusal that leaves nothing behind. The lock file itself is then
+opened relative to the project folder rather than by a bare path: the
+project folder, `.pipeline/`, and the lock file are each opened with
+shortcuts refused instead of followed, and the opened folder is checked
+to still be the project's own `.pipeline/` before anything is locked. So even if `.pipeline/` were
+swapped for a shortcut after the checks, the open itself is refused and
+nothing is created anywhere else. When the lock cannot be taken, or
 exclusive locking is unavailable at all, the numbered write is refused
 with an error and nothing is written: numbering never proceeds without
-the lock.
+the lock. A failed lock attempt removes only the lock file that attempt
+just created; a lock file that was already there is never removed.
+
+## Threat model
+
+This is a single-user tool running on the editor's own Mac. The layers
+above stop mistakes and stale configuration, not an attacker: a
+shortcut (symlink) anywhere in the path at open time, `..` or absolute
+paths escaping the project, overlap with a protected media or Final Cut
+root, overwriting an existing file, and two runs handing out the same
+number. A refused write never deletes or overwrites anything you had:
+the only thing ever removed is the lock file the same failed attempt
+just created. A shortcut swapped in before the lock is opened is
+refused, not followed. Only a swap racing the individual open calls
+themselves — landing after the last check inside a single system call —
+is out of scope; nothing above defends against that, and the docs do
+not claim it does.
 
 ## Size cap
 

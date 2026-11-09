@@ -349,6 +349,95 @@ class TestSafeWrite(unittest.TestCase):
             self.assertEqual(snapshot_tree(footage), before)
             self.assertFalse(os.path.lexists(project / "edit" / "001-cut.fcpxml"))
 
+    def test_numbered_lock_swap_after_check_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            places = self.make_trip(Path(tmp))
+            writer = places["writer"]
+            project = places["project"]
+            footage = places["footage"]
+            before = snapshot_tree(footage)
+            original = SafeWriter._check_lock_path
+            calls = {"count": 0}
+
+            def checking(self, lock):
+                original(self, lock)
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    pipeline = project / ".pipeline"
+                    if pipeline.is_symlink():
+                        pipeline.unlink()
+                    else:
+                        os.rmdir(pipeline)
+                    os.symlink(footage, pipeline)
+
+            with mock.patch.object(
+                SafeWriter, "_check_lock_path", autospec=True, side_effect=checking
+            ):
+                with self.assertRaises(SafeWriteError) as raised:
+                    writer.write_numbered("cut.fcpxml", b"data")
+            self.assertIn("nothing was written", str(raised.exception))
+            self.assertEqual(calls["count"], 2)
+            self.assertFalse(os.path.lexists(footage / "safe-write.lock"))
+            self.assertEqual(snapshot_tree(footage), before)
+            self.assertFalse(os.path.lexists(project / "edit" / "001-cut.fcpxml"))
+
+    def test_numbered_lock_reverification_refuses_replaced_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            places = self.make_trip(Path(tmp))
+            writer = places["writer"]
+            project = places["project"]
+            real_stat = os.stat
+
+            def swapping_stat(path, *args, **kwargs):
+                if path == ".pipeline" and kwargs.get("dir_fd") is not None:
+                    pipeline = project / ".pipeline"
+                    pipeline.rename(project / ".pipeline-orig")
+                    pipeline.mkdir()
+                return real_stat(path, *args, **kwargs)
+
+            with mock.patch(
+                "fcp_pipeline.safe_write.os.stat", side_effect=swapping_stat
+            ):
+                with self.assertRaises(SafeWriteError) as raised:
+                    writer.write_numbered("cut.fcpxml", b"data")
+            self.assertIn("changed while taking the number lock", str(raised.exception))
+            self.assertEqual([entry.name for entry in (project / ".pipeline").iterdir()], [])
+            self.assertFalse(os.path.lexists(project / "edit" / "001-cut.fcpxml"))
+
+    def test_numbered_lock_failure_leaves_no_lock_file_behind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            places = self.make_trip(Path(tmp))
+            writer = places["writer"]
+            project = places["project"]
+            pipeline = project / ".pipeline"
+            with mock.patch(
+                "fcp_pipeline.safe_write.fcntl.flock",
+                side_effect=OSError("lock boom"),
+            ):
+                with self.assertRaises(SafeWriteError):
+                    writer.write_numbered("cut.fcpxml", b"data")
+            self.assertFalse(os.path.lexists(pipeline / "safe-write.lock"))
+            self.assertEqual(
+                [entry.name for entry in pipeline.iterdir()]
+                if pipeline.exists()
+                else [],
+                [],
+            )
+            edit = project / "edit"
+            self.assertEqual(list(edit.iterdir()) if edit.exists() else [], [])
+            pipeline.mkdir(parents=True, exist_ok=True)
+            kept = pipeline / "safe-write.lock"
+            kept.write_bytes(b"kept")
+            with mock.patch(
+                "fcp_pipeline.safe_write.fcntl.flock",
+                side_effect=OSError("lock boom"),
+            ):
+                with self.assertRaises(SafeWriteError):
+                    writer.write_numbered("cut.fcpxml", b"data")
+            self.assertEqual(kept.read_bytes(), b"kept")
+            self.assertEqual([entry.name for entry in pipeline.iterdir()], ["safe-write.lock"])
+            self.assertEqual(list(edit.iterdir()) if edit.exists() else [], [])
+
     def test_numbered_fails_closed_without_lock(self):
         cases = (
             ("flock OSError", "flock"),

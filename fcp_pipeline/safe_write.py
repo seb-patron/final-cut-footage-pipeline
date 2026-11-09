@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -39,6 +40,12 @@ _NUMBERED_RE = re.compile(r"([0-9]{3})-")
 _MAX_NUMBER = 999
 #: Lock file inside ``.pipeline/`` that serialises numbering across processes.
 _LOCK_FILENAME = "safe-write.lock"
+#: How many times the lock file open itself is attempted. A racing
+#: creator can make one attempt report a spurious ``ENOENT`` for the
+#: absent leaf; the file exists by the next attempt, so retrying with
+#: the same directory descriptor and ``O_NOFOLLOW`` keeps every safety
+#: property while letting a racing writer through.
+_LOCK_OPEN_ATTEMPTS = 3
 #: Prefix for temporary files, which live in the target's own folder.
 _TEMP_PREFIX = ".safe-write-"
 #: Mode for published files (owner write, everyone read).
@@ -269,10 +276,21 @@ class SafeWriter:
         """Exclusive flock on the ``.pipeline/`` lock file (mandatory).
 
         The lock serialises number choice across processes; the exclusive
-        hard link stays the final guard as well. Raises
-        :class:`SafeWriteError` without handing out a number when the lock
-        path is unsafe or the lock cannot be taken: numbering never
-        proceeds without the lock.
+        hard link stays the final guard as well. The lock file is opened
+        relative to the project root: ``.pipeline/`` is opened from a
+        project-root directory descriptor with ``O_NOFOLLOW``, the opened
+        folder is re-verified (``fstat`` against a fresh ``fstatat`` of the
+        root's ``.pipeline/``) to still be the project's own ``.pipeline/``,
+        and only then is the lock file opened from that folder descriptor
+        with ``O_NOFOLLOW`` (retried a bounded number of times when a
+        racing creator makes one attempt report a spurious ``ENOENT``).
+        A shortcut swapped into the path after the checks is therefore
+        refused instead of followed, and nothing is created outside
+        ``.pipeline/``. Raises :class:`SafeWriteError`
+        without handing out a number when the lock path is unsafe or the
+        lock cannot be taken: numbering never proceeds without the lock.
+        A failed attempt removes only the lock file that attempt just
+        created; anything already on disk is left alone.
         """
         lock = self._pipeline / _LOCK_FILENAME
         self._check_lock_path(lock)
@@ -282,23 +300,139 @@ class SafeWriter:
                 f"unavailable, so no number can be handed out safely "
                 f"(lock file {lock})"
             )
+        root_fd = None
+        pipe_fd = None
+        fd = None
+        handle = None
+        created = False
+        finished = False
         try:
             self._pipeline.mkdir(parents=True, exist_ok=True)
             self._check_lock_path(lock)
-            handle = open(os.fspath(lock), "ab")  # noqa: PTH123
+            root_fd = os.open(
+                os.fspath(self._project),
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            pipe_fd = os.open(
+                ".pipeline",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+            opened = os.fstat(pipe_fd)
+            # Follow symlinks here on purpose: when ".pipeline/" is a
+            # shortcut, this names its target, whose identity cannot match
+            # the O_NOFOLLOW-opened folder above, so a swap is refused.
+            current = os.stat(".pipeline", dir_fd=root_fd, follow_symlinks=True)
+            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise SafeWriteError(
+                    "refused numbered output in edit/: the project's "
+                    ".pipeline/ changed while taking the number lock; "
+                    "nothing was written"
+                )
+            for _ in range(_LOCK_OPEN_ATTEMPTS):
+                try:
+                    os.stat(_LOCK_FILENAME, dir_fd=pipe_fd, follow_symlinks=False)
+                    created = False
+                except FileNotFoundError:
+                    created = True
+                try:
+                    fd = os.open(
+                        _LOCK_FILENAME,
+                        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                        0o666,
+                        dir_fd=pipe_fd,
+                    )
+                except FileNotFoundError:
+                    # A racing creator can make this very open report
+                    # ENOENT for the absent leaf it should have created;
+                    # the file exists by the next attempt, so retry with
+                    # the same dir_fd and O_NOFOLLOW. Anything else
+                    # (ELOOP on a shortcut, EACCES, ...) fails at once.
+                    fd = None
+                    continue
+                break
+            if fd is None:
+                raise SafeWriteError(
+                    "refused numbered output in edit/: could not lock "
+                    f"{lock} (the lock file could not be opened); "
+                    "nothing was written"
+                )
+            try:
+                handle = os.fdopen(fd, "ab")  # noqa: PTH123
+            except OSError:
+                # Leave fd open: the finally block below closes it and,
+                # through _remove_own_lock, removes the lock file when
+                # (and only when) this call just created it.
+                raise
+            fd = None
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            finished = True
+            return handle
         except SafeWriteError:
             raise
         except OSError as exc:
-            try:
-                handle.close()  # type: ignore[possibly-undefined]
-            except (OSError, NameError):
-                pass
             raise SafeWriteError(
                 f"refused numbered output in edit/: could not lock {lock} "
                 f"({exc}); nothing was written"
             ) from exc
-        return handle
+        finally:
+            try:
+                if not finished and created and pipe_fd is not None:
+                    self._remove_own_lock(pipe_fd, handle, fd)
+            finally:
+                if root_fd is not None:
+                    try:
+                        os.close(root_fd)
+                    except OSError:
+                        pass
+                if pipe_fd is not None:
+                    try:
+                        os.close(pipe_fd)
+                    except OSError:
+                        pass
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                if handle is not None and not finished:
+                    try:
+                        handle.close()
+                    except OSError:
+                        pass
+
+    @staticmethod
+    def _remove_own_lock(pipe_fd, handle, fd) -> None:
+        """Remove the lock file this call just created, and only that file.
+
+        The lock file is unlinked only when the path still names the very
+        file this call opened (same ``st_dev``/``st_ino``) and that entry
+        is a regular file: a pre-existing lock file, a shortcut, or
+        anything that changed under the path is left alone.
+        """
+        fileno = None
+        if handle is not None:
+            try:
+                fileno = handle.fileno()
+            except OSError:
+                fileno = None
+        if fileno is None:
+            fileno = fd
+        if fileno is None:
+            return
+        try:
+            ours = os.fstat(fileno)
+            there = os.stat(_LOCK_FILENAME, dir_fd=pipe_fd, follow_symlinks=False)
+        except OSError:
+            return
+        if (ours.st_dev, ours.st_ino) != (there.st_dev, there.st_ino):
+            return
+        if not stat.S_ISREG(there.st_mode):
+            return
+        try:
+            os.unlink(_LOCK_FILENAME, dir_fd=pipe_fd)
+        except OSError:
+            pass
 
     @staticmethod
     def _release_number_lock(handle) -> None:
