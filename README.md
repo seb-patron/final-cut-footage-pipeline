@@ -100,6 +100,8 @@ python3 -m fcp_pipeline --help
 
 Main-path steps in order: scan, pull, transcribe, tag, photos, memo, organize, patch, export, roughcut; then ingest (optional); then run. Every step takes `--trip <folder>` (required) and `--dry-run`. An unbuilt step reads and writes nothing, prints `<step>: not built yet` to stderr and exits 3, with or without `--dry-run`. `run --trip <folder> [--dry-run]` calls the built main-path steps in registry order, skips the unbuilt ones, never runs ingest, and exits 3 with `run: no steps built yet` while no main-path step is built. The prototype commands (`footage_keywords.py`, `sample_vision.py`) keep working.
 
+Each trip folder holds a `project.toml` following the editor's project layout contract (see `tests/fixtures/trips/minimal/project.toml`): top-level `title`, with `status`, `created`, `dates` and `youtube` accepted but unused; `[final_cut]` records `library` and `events`; `[media]` records `footage`, `photos` and `assets` (all recorded as given, never created or checked); the pipeline-owned `[pipeline]` table holds `timezone`, `start_date` (a TOML local date, `YYYY-MM-DD`), `clock_offsets` and `places`. Pipeline keys at the top level are rejected, and unknown keys warn once.
+
 ## Tests
 
 ```sh
