@@ -5,20 +5,19 @@ from pathlib import Path
 from fractions import Fraction
 import xml.etree.ElementTree as ET
 from xml.parsers import expat
+from fcp_pipeline.fcptime import (
+    check_frame_range,
+    check_source_range,
+    clip_timing,
+    seconds,
+    snap_range,
+    xtime,
+)
+from fcp_pipeline.fcpxml_read import parse_xml, parse_xml_bytes, same_annotation, xml_bytes
 
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-
-def seconds(value):
-    value = str(value)
-    return Fraction(value[:-1] if value.endswith('s') else value)
-
-
-def xtime(value):
-    v = Fraction(value)
-    return f'{v.numerator}/{v.denominator}s'
 
 
 def save(path, obj):
@@ -70,56 +69,6 @@ def propose(inventory, segments, root, visual=None):
                 reviewed=False, approved=False))
     return dict(schema=1, inventory_sha256=digest(inventory), assets=assets,
                 timestamp_basis='seconds relative to source file; not timeline time', proposals=proposals)
-
-
-def xml_bytes(path):
-    path = Path(path)
-    for parent in path.parents:
-        if parent.suffix == '.fcpxmld':
-            if path != parent / 'Info.fcpxml' or set(parent.iterdir()) != {path}:
-                raise ValueError('bundled sidecars unsupported')
-            break
-    return path.read_bytes()
-
-
-def parse_xml_bytes(raw):
-    # Deliberately narrow encoding contract; reject UTF-16/32 before XML parsing.
-    try:
-        text = raw.decode('utf-8-sig')
-    except UnicodeDecodeError as error:
-        raise ValueError('only UTF-8 XML supported') from error
-    if '\x00' in text:
-        raise ValueError('only UTF-8 XML supported')
-    declaration = re.match(r"\s*<\?xml\s+[^?]*encoding=['\"]([^'\"]+)['\"]", text)
-    if declaration and declaration[1].lower() not in ('utf-8', 'utf8'):
-        raise ValueError('only UTF-8 XML supported')
-    if '<!ENTITY' in text:
-        raise ValueError('XML entities unsupported')
-    # Allow only the bare FCPXML doctype, never an external or internal subset.
-    stripped = text.replace('<!DOCTYPE fcpxml>', '')
-    if '<!DOCTYPE' in stripped:
-        raise ValueError('external/internal DTD declarations unsupported')
-    # Parser-level guards are the security boundary, not byte-pattern matching.
-    guard = expat.ParserCreate()
-    def reject(*args):
-        raise ValueError('XML entities/external resources unsupported')
-    def doctype(name, system_id, public_id, internal_subset):
-        if name != 'fcpxml' or system_id or public_id or internal_subset:
-            reject()
-    guard.StartDoctypeDeclHandler = doctype
-    guard.EntityDeclHandler = reject
-    guard.ExternalEntityRefHandler = reject
-    guard.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
-    guard.Parse(text, True)
-    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
-    tree = ET.fromstring(text, parser=parser)
-    if tree.tag != 'fcpxml':
-        raise ValueError('FCPXML root required')
-    return tree
-
-
-def parse_xml(path):
-    return parse_xml_bytes(xml_bytes(path))
 
 
 def source_path(uri):
@@ -225,15 +174,6 @@ def bind(xml, proposal, event_name, asset_ids):
     return p
 
 
-def same_annotation(element, kind, attrs, clip_start, clip_duration):
-    if element.tag != kind:
-        return False
-    labels = [v.strip() for v in element.get('value','').split(',')] if kind == 'keyword' else [element.get('value')]
-    return (attrs['value'] in labels
-            and seconds(element.get('start', xtime(clip_start))) == seconds(attrs['start'])
-            and seconds(element.get('duration', xtime(clip_duration))) == seconds(attrs['duration']))
-
-
 def publish_packet(output, data, audit):
     """Publish XML+audit as ONE atomic, exclusive ZIP; never a naked partial XML."""
     output = Path(output)
@@ -272,8 +212,7 @@ def patch(xml, proposal, event_name, output):
             raise ValueError('approved annotation needs explicit review and evidence')
         a = p['assets'][r['asset_id']]
         start, end = seconds(r['start_seconds']), seconds(r['end_seconds'])
-        if not 0 <= start < end <= seconds(a['duration_seconds']):
-            raise ValueError('out-of-bounds source range')
+        check_source_range(start, end, seconds(a['duration_seconds']))
         c, resource, frame, identity = target(tree, event_name, a)
         bound = binding.get('assets', {}).get(r['asset_id'], {})
         if a['source_uri'] not in checked_sources:
@@ -281,16 +220,10 @@ def patch(xml, proposal, event_name, output):
         if bound.get('identity') != identity or bound.get('source') != checked_sources[a['source_uri']]:
             raise ValueError('stale source/native identity; bind and review again')
         fd = seconds(frame.get('frameDuration'))
-        origin = seconds(resource.get('start','0s'))
+        origin, clip_start, clip_duration, source_duration = clip_timing(c, resource)
         # Frame enclosure is explicit; never silently truncate to a trimmed clip.
-        lo = origin + math.floor(start / fd) * fd
-        hi = origin + math.ceil(end / fd) * fd
-        clip_start = seconds(c.get('start', resource.get('start','0s')))
-        clip_duration = seconds(c.get('duration', resource.get('duration')))
-        if not clip_start <= lo < hi <= clip_start + clip_duration:
-            raise ValueError('frame-aligned range exceeds browser clip; revise and review')
-        if not origin <= lo < hi <= origin + seconds(resource.get('duration')):
-            raise ValueError('frame-aligned range exceeds native source')
+        lo, hi = snap_range(start, end, fd, origin)
+        check_frame_range(lo, hi, clip_start, clip_duration, origin, source_duration)
         kind = r['kind']
         if kind not in ('keyword','marker') or not r['label'].strip():
             raise ValueError('invalid annotation')
