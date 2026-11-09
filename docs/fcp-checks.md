@@ -1,6 +1,6 @@
 # Final Cut hand checks
 
-These five samples are built by the check-sample generator for hand
+These six samples are built by the check-sample generator for hand
 checks inside Final Cut Pro. The generator only writes files into the
 new output folder. It never opens Final Cut Pro and never scripts it.
 For the export-based samples it reads the provided export file (or the
@@ -128,3 +128,32 @@ shorter inner ranges; that playback order is back to back from zero. The
 first clip of Check rough cut carries one added keyword and one added
 marker; record that both are present. Record anything missing,
 reordered, or wrongly timed.
+
+## Photo card sample (photo-card.fcpxml)
+
+What it holds: four Film Photo Card generator clips, one per installed
+template variant, back to back on one project spine, each with its
+caption text and a note naming its source still. The event also holds
+the four matching synthetic source stills as unplaced clips, named by
+number to pair with their cards (P001 with S001, and so on), plus a
+manifest listing every pair.
+
+Build it:
+
+    python3 -m tests.fcp_samples --output <new-folder> --photo-card
+
+This writes `<new-folder>/media/` with the four stills,
+`<new-folder>/photo-card.fcpxml`, and
+`<new-folder>/photo-card-manifest.json`.
+
+Import it by hand: in Final Cut Pro choose File > Import > XML, select
+`photo-card.fcpxml`, and let Final Cut assign new identifiers on
+import.
+
+Look at and record afterwards: the four cards on the spine in variant
+order; the four source stills in the event; that each card number pairs
+with the still of the same number and stem. Then do the Apply Clip step
+for each card and the midpoint render described in
+docs/photo-card-encoding.md, and confirm every midpoint shows its own
+photo, not the template placeholder. Record anything missing, unpaired,
+or still showing the placeholder after binding.
