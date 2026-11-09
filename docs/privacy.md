@@ -41,7 +41,8 @@ log; it just adds refusal lines.
 
 Every call, whether it was sent, failed, or refused while offline,
 appends exactly one line to `.pipeline/network-log.tsv` inside the trip
-folder. The file is created with a header line the first time it is
+folder, except that a successful call whose log write is refused appends
+no line and emits one warning instead. The file is created with a header line the first time it is
 needed, and it is only ever appended to, never rewritten. The folder is
 created if it is missing. The log is opened relative to directory file
 descriptors with `O_NOFOLLOW` at every component under the trip folder
@@ -50,8 +51,10 @@ a symlink, the write is refused rather than followed, and a swapped link
 can never redirect the log outside the trip folder. The log file itself is opened with `O_NONBLOCK` so an existing FIFO can never block the open, and only a regular file is ever written: any other file type at the log path is closed and refused without writing anything. After the log file is
 opened, the opened `.pipeline` directory is re-verified with `fstat` and
 `fstatat` (same `st_dev` and `st_ino` as `root_fd/.pipeline`); if that
-check fails, only the file this call just created is removed, nothing is
-written, and the call raises a refusal instead.
+check fails, only the file this call just created is removed and nothing
+is written. When a call succeeds but the log write is refused, the gate
+still returns the call's result and emits one warning naming the log
+problem (never request text or keys) instead of raising.
 
 Columns, in order:
 
@@ -104,9 +107,9 @@ opens every path component from the project-root directory fd with
 re-verifies with `fstat`/`fstatat` that the opened directory is still the
 project's own `.pipeline` (same `st_dev` and `st_ino` as
 `root_fd/.pipeline`). If that check fails, it removes only the file this
-call just created, raises
-`refusing to write the network log outside the project folder`, and
-writes nothing else.
+call just created and writes nothing else, and the refused write keeps
+the call's result with one warning naming the log problem instead of
+raising.
 
 ## Where the keys come from, and that they are never written down
 

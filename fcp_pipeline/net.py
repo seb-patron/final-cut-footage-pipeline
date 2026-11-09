@@ -5,7 +5,9 @@ it builds the OpenAI and Anthropic clients and runs each call. An offline
 switch (``offline = true`` in the ``[pipeline]`` table of ``project.toml``,
 or ``--offline`` on any command, which flips the process-wide switch with
 :func:`set_offline`) refuses each call before any connection. Every call
-appends one content-free line to ``<project>/.pipeline/network-log.tsv``.
+appends one content-free line to ``<project>/.pipeline/network-log.tsv``,
+except a successful call whose log write is refused, which keeps its
+result and emits one warning instead.
 API keys come from the environment or the macOS Keychain and are never
 written to disk, logs or errors.
 
@@ -22,6 +24,7 @@ import os
 import stat
 import subprocess
 import sys
+import warnings
 
 #: Environment variables read first for API keys.
 OPENAI_ENV_VAR = "OPENAI_API_KEY"
@@ -398,8 +401,12 @@ class NetworkGate:
         what goes out as kinds and sizes, never the content; ``request``
         is a zero-argument callable doing the actual SDK call. When the
         gate is offline, raise :class:`OfflineError` before calling
-        ``request``. Allowed, failed and refused calls all log exactly
-        one line with outcome ``sent``, ``failed`` or ``refused offline``.
+        ``request``. Allowed and failed calls log exactly one line with
+        outcome ``sent`` or ``failed``; an offline call logs one line
+        with outcome ``refused offline``. When the call succeeds but the
+        log write is refused, the result is still returned and exactly
+        one warning naming the log problem (never request text or keys)
+        is emitted instead of raising.
         """
         if service not in VALID_SERVICES:
             raise ValueError(f"unknown service: {service!r}")
@@ -412,7 +419,10 @@ class NetworkGate:
         except Exception:
             self._append_log(service, model, summary, "failed")
             raise
-        self._append_log(service, model, summary, "sent")
+        try:
+            self._append_log(service, model, summary, "sent")
+        except Exception as exc:
+            warnings.warn(str(exc), stacklevel=2)
         return result
 
     def openai_client(self):

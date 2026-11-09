@@ -18,6 +18,7 @@ import sys
 import tempfile
 import types
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -248,10 +249,15 @@ class TestNet(unittest.TestCase):
             outside = Path(tmp) / "outside"
             outside.mkdir()
             (trip / ".pipeline").symlink_to(outside, target_is_directory=True)
-            with self.assertRaises(RuntimeError) as raised:
-                gate.call("openai", "test-model", [("text", 5)], lambda: "ok")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = gate.call(
+                    "openai", "test-model", [("text", 5)], lambda: "ok"
+                )
+            self.assertEqual(result, "ok")
+            self.assertEqual(len(caught), 1)
             self.assertEqual(
-                str(raised.exception),
+                str(caught[0].message),
                 "refusing to write the network log outside the project folder",
             )
             self.assertEqual(list(outside.iterdir()), [])
@@ -264,10 +270,15 @@ class TestNet(unittest.TestCase):
             (trip / ".pipeline").mkdir()
             capture = Path(tmp) / "capture.tsv"
             (trip / ".pipeline" / "network-log.tsv").symlink_to(capture)
-            with self.assertRaises(RuntimeError) as raised:
-                gate.call("openai", "test-model", [("text", 5)], lambda: "ok")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = gate.call(
+                    "openai", "test-model", [("text", 5)], lambda: "ok"
+                )
+            self.assertEqual(result, "ok")
+            self.assertEqual(len(caught), 1)
             self.assertEqual(
-                str(raised.exception),
+                str(caught[0].message),
                 "refusing to write the network log outside the project folder",
             )
             self.assertFalse(capture.exists())
@@ -282,6 +293,7 @@ class TestNet(unittest.TestCase):
             script = "\n".join(
                 [
                     "import sys",
+                    "import warnings",
                     f"sys.path.insert(0, {str(REPO_ROOT)!r})",
                     "from fcp_pipeline.trip import load_trip",
                     "from fcp_pipeline.net import NetworkGate",
@@ -289,13 +301,14 @@ class TestNet(unittest.TestCase):
                     "def request():",
                     "    print('request-ran', flush=True)",
                     "    return 'ok'",
-                    "try:",
+                    "with warnings.catch_warnings(record=True) as caught:",
+                    "    warnings.simplefilter('always')",
                     "    result = gate.call("
-                    "'openai', 'test-model', [('text', 5)], request)",
-                    "    print('returned:' + str(result), flush=True)",
-                    "except RuntimeError as exc:",
-                    "    print('refused:' + str(exc), flush=True)",
-                    "    raise SystemExit(3)",
+                    "        'openai', 'test-model', [('text', 5)], request)",
+                    "print('returned:' + str(result), flush=True)",
+                    "print('warnings:' + str(len(caught)), flush=True)",
+                    "for record in caught:",
+                    "    print('warning:' + str(record.message), flush=True)",
                 ]
             )
             with mock.patch.object(
@@ -309,13 +322,115 @@ class TestNet(unittest.TestCase):
                 )
             # Bounded time: subprocess.run raises TimeoutExpired (and kills
             # the child) instead of returning when the call hangs.
-            self.assertEqual(proc.returncode, 3)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn("request-ran", proc.stdout)
+            self.assertIn("returned:ok", proc.stdout)
+            self.assertIn("warnings:1", proc.stdout)
             self.assertIn(
-                "refusing to write the network log outside the project folder",
+                "warning:refusing to write the network log "
+                "outside the project folder",
                 proc.stdout,
             )
-            self.assertNotIn("returned:", proc.stdout)
+            self.assertTrue(stat.S_ISFIFO(os.stat(fifo).st_mode))
+            # Nothing was written into the FIFO: a non-blocking read after
+            # the child exits finds no data and no waiting writer.
+            reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                try:
+                    data = os.read(reader, 65536)
+                except BlockingIOError:
+                    data = b""
+            finally:
+                os.close(reader)
+            self.assertEqual(data, b"")
+            self.assertNoSocketUse()
+
+    def test_fifo_log_path_with_reader_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_trip(Path(tmp))
+            (trip / ".pipeline").mkdir()
+            fifo = trip / ".pipeline" / "network-log.tsv"
+            os.mkfifo(fifo)
+            script = "\n".join(
+                [
+                    "import os",
+                    "import sys",
+                    "import threading",
+                    "import warnings",
+                    f"sys.path.insert(0, {str(REPO_ROOT)!r})",
+                    "from fcp_pipeline.trip import load_trip",
+                    "from fcp_pipeline.net import NetworkGate",
+                    "trip = sys.argv[1]",
+                    "fifo = sys.argv[2]",
+                    "gate = NetworkGate(load_trip(trip), 'scan')",
+                    "opened = threading.Event()",
+                    "release = threading.Event()",
+                    "outcome = {}",
+                    "def reader():",
+                    "    fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)",
+                    "    opened.set()",
+                    "    release.wait(timeout=10)",
+                    "    try:",
+                    "        outcome['data'] = os.read(fd, 65536)",
+                    "    except OSError as exc:",
+                    "        outcome['data'] = exc",
+                    "    finally:",
+                    "        os.close(fd)",
+                    "thread = threading.Thread(target=reader)",
+                    "thread.start()",
+                    "if not opened.wait(timeout=10):",
+                    "    print('reader-open-timeout', flush=True)",
+                    "    raise SystemExit(4)",
+                    "def request():",
+                    "    print('request-ran', flush=True)",
+                    "    return 'ok'",
+                    "with warnings.catch_warnings(record=True) as caught:",
+                    "    warnings.simplefilter('always')",
+                    "    result = gate.call(",
+                    "        'openai', 'test-model', [('text', 5)], request)",
+                    "release.set()",
+                    "thread.join(timeout=10)",
+                    "print('returned:' + str(result), flush=True)",
+                    "print('warnings:' + str(len(caught)), flush=True)",
+                    "for record in caught:",
+                    "    print('warning:' + str(record.message), flush=True)",
+                    "print('reader-alive:' + str(thread.is_alive()),",
+                    "      flush=True)",
+                    "data = outcome.get('data')",
+                    "if isinstance(data, bytes):",
+                    "    print('reader-bytes:' + str(len(data)), flush=True)",
+                    "else:",
+                    "    print('reader-error:' + type(data).__name__,",
+                    "          flush=True)",
+                ]
+            )
+            with mock.patch.object(
+                subprocess, "run", _REAL_SUBPROCESS_RUN
+            ), mock.patch.object(subprocess, "Popen", _REAL_SUBPROCESS_POPEN):
+                proc = subprocess.run(
+                    [sys.executable, "-c", script, str(trip), str(fifo)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            # Bounded time: subprocess.run raises TimeoutExpired (and kills
+            # the child) instead of returning when the call hangs.
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("request-ran", proc.stdout)
+            self.assertIn("returned:ok", proc.stdout)
+            self.assertIn("warnings:1", proc.stdout)
+            self.assertIn(
+                "warning:refusing to write the network log "
+                "outside the project folder",
+                proc.stdout,
+            )
+            # The reader thread finished promptly and saw no log bytes.
+            self.assertIn("reader-alive:False", proc.stdout)
+            self.assertTrue(
+                "reader-bytes:0" in proc.stdout
+                or "reader-error:BlockingIOError" in proc.stdout,
+                proc.stdout,
+            )
             self.assertTrue(stat.S_ISFIFO(os.stat(fifo).st_mode))
             self.assertNoSocketUse()
 
@@ -352,10 +467,15 @@ class TestNet(unittest.TestCase):
                 return "ok"
 
             with mock.patch("os.open", new=sneak_new):
-                with self.assertRaises(RuntimeError) as raised:
-                    gate.call("openai", "test-model", [("text", 5)], request)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    result = gate.call(
+                        "openai", "test-model", [("text", 5)], request
+                    )
+            self.assertEqual(result, "ok")
+            self.assertEqual(len(caught), 1)
             self.assertEqual(
-                str(raised.exception),
+                str(caught[0].message),
                 "refusing to write the network log outside the project folder",
             )
             self.assertEqual(seen, [True])
@@ -395,12 +515,15 @@ class TestNet(unittest.TestCase):
                 return "ok"
 
             with mock.patch("os.open", new=sneak_existing):
-                with self.assertRaises(RuntimeError) as raised2:
-                    gate2.call(
+                with warnings.catch_warnings(record=True) as caught2:
+                    warnings.simplefilter("always")
+                    result2 = gate2.call(
                         "openai", "test-model", [("text", 5)], request2
                     )
+            self.assertEqual(result2, "ok")
+            self.assertEqual(len(caught2), 1)
             self.assertEqual(
-                str(raised2.exception),
+                str(caught2[0].message),
                 "refusing to write the network log outside the project folder",
             )
             self.assertEqual(seen2, [True])
