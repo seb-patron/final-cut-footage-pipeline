@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fcp_pipeline.catalog import Catalog, CatalogError, MediaRecord, TagRecord
@@ -487,6 +489,104 @@ def place_clusters(catalog: Catalog, settings: object) -> list[GpsCluster]:
     return clusters
 
 
+#: A ``[[pipeline.places]]`` header, allowing TOML whitespace.
+_PLACES_HEADER_RE = re.compile(r"\[\[\s*pipeline\.places\s*\]\]")
+
+#: Any TOML table header; the nearest one above a value owns that value.
+_TABLE_HEADER_RE = re.compile(r"^\s*\[")
+
+#: A ``key =`` assignment at the start of a TOML line.
+_KEY_RE = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=")
+
+#: Quoted spans, blanked before hunting for a bare over-long integer.
+_QUOTED_RE = re.compile(r'"[^"\n]*"|\'[^\'\n]*\'')
+
+
+def _is_digit_limit_error(exc: ValueError) -> bool:
+    """Whether ``exc`` is Python's integer digit-limit refusal."""
+    message = str(exc).lower()
+    return "exceeds the limit" in message and "digit" in message
+
+
+def _digit_limit_error(trip: object, exc: ValueError) -> DaysPlacesError:
+    """Explain an over-long settings number without echoing it.
+
+    The TOML parser turns a bare integer past
+    :func:`sys.get_int_max_str_digits` into ``ValueError`` before the
+    step ever sees the value, so locate the culprit cheaply: scan the
+    raw settings text for the longest bare digit run, take the key
+    from its line and the place entry from the nearest preceding
+    ``[[pipeline.places]]`` header. At most the first 12 digits are
+    quoted; the file is always named even when no entry is found.
+    """
+    settings_file = Path(str(trip)) / "project.toml"
+    get_limit = getattr(sys, "get_int_max_str_digits", None)
+    try:
+        limit = get_limit() if get_limit is not None else None
+    except Exception:
+        limit = None
+    if isinstance(limit, int) and limit > 0:
+        capped = f" (over the {limit}-digit limit)"
+        floor = limit
+    else:
+        capped = ""
+        floor = 0
+    entry: int | None = None
+    key: str | None = None
+    preview: str | None = None
+    try:
+        text = settings_file.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        text = None
+    if text is not None:
+        # Blank quoted strings, then drop ``#`` comments, so digit runs
+        # and headers inside either cannot shadow the real culprit.
+        code_lines = [
+            _QUOTED_RE.sub("", line).split("#", 1)[0]
+            for line in text.splitlines()
+        ]
+        total = sum(
+            1 for line in code_lines if _PLACES_HEADER_RE.search(line)
+        )
+        best_length = floor
+        best_line = -1
+        best_run = ""
+        for index, line in enumerate(code_lines):
+            for match in re.finditer(r"\d+", line):
+                length = match.end() - match.start()
+                if length > best_length:
+                    best_length = length
+                    best_line = index
+                    best_run = match.group()
+        if best_line >= 0:
+            key_match = _KEY_RE.match(code_lines[best_line])
+            if key_match is not None:
+                key = key_match.group(1)
+            header: str | None = None
+            if best_line > 0:
+                for line in code_lines[best_line - 1 :: -1]:
+                    if _TABLE_HEADER_RE.match(line):
+                        header = line
+                        break
+            if header is not None and _PLACES_HEADER_RE.search(header):
+                before = sum(
+                    1
+                    for line in code_lines[:best_line]
+                    if _PLACES_HEADER_RE.search(line)
+                )
+                if before >= 1:
+                    entry = before - 1
+            preview = best_run[:12] + "..."
+    message = f"bad settings file '{settings_file}': number too long{capped}"
+    if entry is not None:
+        message += f"; place entry {entry} (entry {entry + 1} of {total})"
+    if key is not None:
+        message += f" key {key!r}"
+    if preview is not None and (entry is not None or key is not None):
+        message += f" got {preview!r}"
+    return DaysPlacesError(message)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the days-and-places step for one trip folder."""
     parser = argparse.ArgumentParser(
@@ -504,6 +604,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = load_trip(args.trip)
     except (TripSettingsError, ValueError) as exc:
+        if not isinstance(exc, TripSettingsError) and _is_digit_limit_error(
+            exc
+        ):
+            exc = _digit_limit_error(args.trip, exc)
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:

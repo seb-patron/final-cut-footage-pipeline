@@ -496,75 +496,91 @@ class TestDays(unittest.TestCase):
                 )
 
     def test_huge_integers_rejected_with_truncated_message(self):
-        huge_digits = "9" * 5001
-        old_limit = sys.get_int_max_str_digits()
-        sys.set_int_max_str_digits(0)
-        try:
-            huge = int(huge_digits)
-            with self.subTest("latitude"):
-                with self.assertRaises(DaysPlacesError) as raised:
-                    _validate_places(
-                        [
-                            {
-                                "name": "Invented Cove",
-                                "lat": huge,
-                                "lon": 0.0,
-                                "radius_m": 500,
-                            }
-                        ]
-                    )
-                message = str(raised.exception)
-                self.assertIn("place entry 0", message)
-                self.assertIn("lat", message)
-                self.assertNotIn(huge_digits, message)
-                self.assertLess(len(message), 500)
-            with self.subTest("radius"):
-                with self.assertRaises(DaysPlacesError) as raised:
-                    _validate_places(
-                        [
-                            {
-                                "name": "Invented Cove",
-                                "lat": 0.0,
-                                "lon": 0.0,
-                                "radius_m": huge,
-                            }
-                        ]
-                    )
-                message = str(raised.exception)
-                self.assertIn("place entry 0", message)
-                self.assertIn("radius_m", message)
-                self.assertNotIn(huge_digits, message)
-                self.assertLess(len(message), 500)
-            with self.subTest("cli latitude"):
-                with tempfile.TemporaryDirectory() as tmp:
-                    text = (
-                        trip_text()
-                        + '[[pipeline.places]]\nname = "Invented Cove"\n'
-                        + f"lat = {huge_digits}\nlon = 0\nradius_m = 500\n"
-                    )
-                    trip = write_trip(tmp, text)
-                    err = io.StringIO()
-                    with contextlib.redirect_stderr(err):
-                        code = main(["--trip", os.fspath(trip)])
-                    self.assertEqual(code, 1)
-                    self.assertNotIn("Traceback", err.getvalue())
-                    self.assertIn("lat", err.getvalue())
-            with self.subTest("cli radius"):
-                with tempfile.TemporaryDirectory() as tmp:
-                    text = (
-                        trip_text()
-                        + '[[pipeline.places]]\nname = "Invented Cove"\n'
-                        + f"lat = 0\nlon = 0\nradius_m = {huge_digits}\n"
-                    )
-                    trip = write_trip(tmp, text)
-                    err = io.StringIO()
-                    with contextlib.redirect_stderr(err):
-                        code = main(["--trip", os.fspath(trip)])
-                    self.assertEqual(code, 1)
-                    self.assertNotIn("Traceback", err.getvalue())
-                    self.assertIn("radius_m", err.getvalue())
-        finally:
-            sys.set_int_max_str_digits(old_limit)
+        limit_before = sys.get_int_max_str_digits()
+        # Built by shifting, not by parsing, so the default digit limit
+        # is never touched: too wide for a float, but printable.
+        huge = 1 << 2000
+        huge_digits = str(huge)
+        self.assertGreater(huge.bit_length(), 1024)
+        with self.subTest("latitude"):
+            with self.assertRaises(DaysPlacesError) as raised:
+                _validate_places(
+                    [
+                        {
+                            "name": "Invented Cove",
+                            "lat": huge,
+                            "lon": 0.0,
+                            "radius_m": 500,
+                        }
+                    ]
+                )
+            message = str(raised.exception)
+            self.assertIn("place entry 0", message)
+            self.assertIn("lat", message)
+            self.assertNotIn(huge_digits, message)
+            self.assertLess(len(message), 500)
+        with self.subTest("radius"):
+            with self.assertRaises(DaysPlacesError) as raised:
+                _validate_places(
+                    [
+                        {
+                            "name": "Invented Cove",
+                            "lat": 0.0,
+                            "lon": 0.0,
+                            "radius_m": huge,
+                        }
+                    ]
+                )
+            message = str(raised.exception)
+            self.assertIn("place entry 0", message)
+            self.assertIn("radius_m", message)
+            self.assertNotIn(huge_digits, message)
+            self.assertLess(len(message), 500)
+        with self.subTest("cli latitude"):
+            with tempfile.TemporaryDirectory() as tmp:
+                digits = "9" * 5001
+                text = (
+                    trip_text()
+                    + '[[pipeline.places]]\nname = "Invented Cove"\n'
+                    + f"lat = {digits}\nlon = 0\nradius_m = 500\n"
+                )
+                trip = write_trip(tmp, text)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = main(["--trip", os.fspath(trip)])
+                output = err.getvalue()
+                self.assertEqual(code, 1)
+                self.assertNotIn("Traceback", output)
+                self.assertIn("project.toml", output)
+                self.assertIn(os.fspath(trip), output)
+                self.assertIn("too long", output)
+                self.assertIn("place entry 0", output)
+                self.assertIn("lat", output)
+                self.assertNotIn(digits, output)
+                self.assertLess(len(output), 500)
+        with self.subTest("cli radius"):
+            with tempfile.TemporaryDirectory() as tmp:
+                digits = "9" * 5001
+                text = (
+                    trip_text()
+                    + '[[pipeline.places]]\nname = "Invented Cove"\n'
+                    + f"lat = 0\nlon = 0\nradius_m = {digits}\n"
+                )
+                trip = write_trip(tmp, text)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = main(["--trip", os.fspath(trip)])
+                output = err.getvalue()
+                self.assertEqual(code, 1)
+                self.assertNotIn("Traceback", output)
+                self.assertIn("project.toml", output)
+                self.assertIn(os.fspath(trip), output)
+                self.assertIn("too long", output)
+                self.assertIn("place entry 0", output)
+                self.assertIn("radius_m", output)
+                self.assertNotIn(digits, output)
+                self.assertLess(len(output), 500)
+        self.assertEqual(sys.get_int_max_str_digits(), limit_before)
 
     def test_unverified_time_gives_check_tag(self):
         with tempfile.TemporaryDirectory() as tmp:
