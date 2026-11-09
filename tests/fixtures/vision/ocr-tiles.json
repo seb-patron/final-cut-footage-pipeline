@@ -1,0 +1,594 @@
+{
+  "cases": {
+    "blank": {
+      "engine": "Apple Vision VNRecognizeTextRequest",
+      "revision": 3,
+      "tiles": [
+        {
+          "index": 0,
+          "lines": []
+        },
+        {
+          "index": 1,
+          "lines": []
+        },
+        {
+          "index": 2,
+          "lines": []
+        },
+        {
+          "index": 3,
+          "lines": []
+        },
+        {
+          "index": 4,
+          "lines": []
+        },
+        {
+          "index": 5,
+          "lines": []
+        },
+        {
+          "index": 6,
+          "lines": []
+        },
+        {
+          "index": 7,
+          "lines": []
+        },
+        {
+          "index": 8,
+          "lines": []
+        }
+      ]
+    },
+    "full_slate": {
+      "engine": "Apple Vision VNRecognizeTextRequest",
+      "revision": 3,
+      "tiles": [
+        {
+          "index": 0,
+          "lines": [
+            {
+              "box": [
+                0.016,
+                0.028,
+                0.09,
+                0.139
+              ],
+              "confidence": 1,
+              "text": "3.3s"
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "lines": []
+        },
+        {
+          "index": 2,
+          "lines": []
+        },
+        {
+          "index": 3,
+          "lines": []
+        },
+        {
+          "index": 4,
+          "lines": [
+            {
+              "box": [
+                0.1,
+                0.45,
+                0.4,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "B-ROLL"
+            },
+            {
+              "box": [
+                0.1,
+                0.2,
+                0.4,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "SLATE"
+            },
+            {
+              "box": [
+                0.1,
+                0.3,
+                0.4,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "DAY 3"
+            },
+            {
+              "box": [
+                0.1,
+                0.38,
+                0.4,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "MOONLIT COVE"
+            },
+            {
+              "box": [
+                0.1,
+                0.55,
+                0.4,
+                0.06
+              ],
+              "confidence": 0.9,
+              "text": "PORTRA 400 ON THE F3"
+            }
+          ]
+        },
+        {
+          "index": 5,
+          "lines": []
+        },
+        {
+          "index": 6,
+          "lines": []
+        },
+        {
+          "index": 7,
+          "lines": []
+        },
+        {
+          "index": 8,
+          "lines": []
+        }
+      ]
+    },
+    "low_confidence": {
+      "engine": "Apple Vision VNRecognizeTextRequest",
+      "revision": 3,
+      "tiles": [
+        {
+          "index": 0,
+          "lines": [
+            {
+              "box": [
+                0.016,
+                0.028,
+                0.09,
+                0.139
+              ],
+              "confidence": 1,
+              "text": "3.3s"
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "lines": []
+        },
+        {
+          "index": 2,
+          "lines": []
+        },
+        {
+          "index": 3,
+          "lines": []
+        },
+        {
+          "index": 4,
+          "lines": [
+            {
+              "box": [
+                0.1,
+                0.45,
+                0.4,
+                0.06
+              ],
+              "confidence": 0.3,
+              "text": "B-ROLL"
+            },
+            {
+              "box": [
+                0.1,
+                0.2,
+                0.4,
+                0.06
+              ],
+              "confidence": 0.3,
+              "text": "SLATE"
+            },
+            {
+              "box": [
+                0.1,
+                0.3,
+                0.4,
+                0.06
+              ],
+              "confidence": 0.3,
+              "text": "DAY 3"
+            },
+            {
+              "box": [
+                0.1,
+                0.38,
+                0.4,
+                0.06
+              ],
+              "confidence": 0.3,
+              "text": "MOONLIT COVE"
+            },
+            {
+              "box": [
+                0.1,
+                0.55,
+                0.4,
+                0.06
+              ],
+              "confidence": 0.3,
+              "text": "PORTRA 400 ON THE F3"
+            }
+          ]
+        },
+        {
+          "index": 5,
+          "lines": []
+        },
+        {
+          "index": 6,
+          "lines": []
+        },
+        {
+          "index": 7,
+          "lines": []
+        },
+        {
+          "index": 8,
+          "lines": []
+        }
+      ]
+    },
+    "not_a_slate": {
+      "engine": "Apple Vision VNRecognizeTextRequest",
+      "revision": 3,
+      "tiles": [
+        {
+          "index": 0,
+          "lines": []
+        },
+        {
+          "index": 1,
+          "lines": [
+            {
+              "box": [
+                0.1,
+                0.3,
+                0.4,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "OPEN LATE"
+            }
+          ]
+        },
+        {
+          "index": 2,
+          "lines": []
+        },
+        {
+          "index": 3,
+          "lines": []
+        },
+        {
+          "index": 4,
+          "lines": []
+        },
+        {
+          "index": 5,
+          "lines": [
+            {
+              "box": [
+                0.1,
+                0.3,
+                0.4,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "SLATE ROOFS LAST LONG"
+            }
+          ]
+        },
+        {
+          "index": 6,
+          "lines": []
+        },
+        {
+          "index": 7,
+          "lines": []
+        },
+        {
+          "index": 8,
+          "lines": []
+        }
+      ]
+    },
+    "one_line": {
+      "engine": "Apple Vision VNRecognizeTextRequest",
+      "revision": 3,
+      "tiles": [
+        {
+          "index": 0,
+          "lines": []
+        },
+        {
+          "index": 1,
+          "lines": []
+        },
+        {
+          "index": 2,
+          "lines": [
+            {
+              "box": [
+                0.1,
+                0.3,
+                0.5,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "SLATE DAY 3 B-ROLL"
+            }
+          ]
+        },
+        {
+          "index": 3,
+          "lines": []
+        },
+        {
+          "index": 4,
+          "lines": []
+        },
+        {
+          "index": 5,
+          "lines": []
+        },
+        {
+          "index": 6,
+          "lines": []
+        },
+        {
+          "index": 7,
+          "lines": []
+        },
+        {
+          "index": 8,
+          "lines": []
+        }
+      ]
+    },
+    "stamp_only": {
+      "engine": "Apple Vision VNRecognizeTextRequest",
+      "revision": 3,
+      "tiles": [
+        {
+          "index": 0,
+          "lines": [
+            {
+              "box": [
+                0.016,
+                0.028,
+                0.09,
+                0.139
+              ],
+              "confidence": 1,
+              "text": "3.3s"
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "lines": [
+            {
+              "box": [
+                0.016,
+                0.028,
+                0.12,
+                0.139
+              ],
+              "confidence": 1,
+              "text": "10.0s"
+            }
+          ]
+        },
+        {
+          "index": 2,
+          "lines": [
+            {
+              "box": [
+                0.016,
+                0.028,
+                0.15,
+                0.139
+              ],
+              "confidence": 1,
+              "text": "170.0s"
+            }
+          ]
+        },
+        {
+          "index": 3,
+          "lines": [
+            {
+              "box": [
+                0.5,
+                0.5,
+                0.1,
+                0.1
+              ],
+              "confidence": 1,
+              "text": "3.3s"
+            }
+          ]
+        },
+        {
+          "index": 4,
+          "lines": []
+        },
+        {
+          "index": 5,
+          "lines": []
+        },
+        {
+          "index": 6,
+          "lines": []
+        },
+        {
+          "index": 7,
+          "lines": []
+        },
+        {
+          "index": 8,
+          "lines": []
+        }
+      ]
+    },
+    "two_slates": {
+      "engine": "Apple Vision VNRecognizeTextRequest",
+      "revision": 3,
+      "tiles": [
+        {
+          "index": 0,
+          "lines": []
+        },
+        {
+          "index": 1,
+          "lines": []
+        },
+        {
+          "index": 2,
+          "lines": [
+            {
+              "box": [
+                0.1,
+                0.3,
+                0.5,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "SLATE DAY 3 B-ROLL"
+            }
+          ]
+        },
+        {
+          "index": 3,
+          "lines": []
+        },
+        {
+          "index": 4,
+          "lines": []
+        },
+        {
+          "index": 5,
+          "lines": []
+        },
+        {
+          "index": 6,
+          "lines": [
+            {
+              "box": [
+                0.1,
+                0.3,
+                0.5,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "SLATE DAY 4 INSERT"
+            }
+          ]
+        },
+        {
+          "index": 7,
+          "lines": []
+        },
+        {
+          "index": 8,
+          "lines": []
+        }
+      ]
+    },
+    "unknown_place": {
+      "engine": "Apple Vision VNRecognizeTextRequest",
+      "revision": 3,
+      "tiles": [
+        {
+          "index": 0,
+          "lines": []
+        },
+        {
+          "index": 1,
+          "lines": []
+        },
+        {
+          "index": 2,
+          "lines": []
+        },
+        {
+          "index": 3,
+          "lines": [
+            {
+              "box": [
+                0.1,
+                0.2,
+                0.4,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "SLATE"
+            },
+            {
+              "box": [
+                0.1,
+                0.3,
+                0.4,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "DAY 3"
+            },
+            {
+              "box": [
+                0.1,
+                0.4,
+                0.4,
+                0.06
+              ],
+              "confidence": 1,
+              "text": "HARBOR OF NOWHERE"
+            }
+          ]
+        },
+        {
+          "index": 4,
+          "lines": []
+        },
+        {
+          "index": 5,
+          "lines": []
+        },
+        {
+          "index": 6,
+          "lines": []
+        },
+        {
+          "index": 7,
+          "lines": []
+        },
+        {
+          "index": 8,
+          "lines": []
+        }
+      ]
+    }
+  }
+}
