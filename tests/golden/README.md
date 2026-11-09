@@ -11,8 +11,9 @@ Two documents compare equal when they differ only in:
 
 - Attribute order: attributes are written sorted by name.
 - Whitespace: whitespace-only text and tails between elements are dropped
-  and the output is re-indented two spaces per level. Any other text is
-  kept exactly.
+  and the output is re-indented two spaces per level. Whitespace-only text
+  inside a childless (leaf) element is significant and kept exactly, as is
+  any other text.
 - Generated ids: every `id` attribute is renumbered `r1`, `r2`, ... in
   document order, and every IDREF attribute the 1.14 DTD declares
   (`format`, `ref`, `projectRef`, `tracking`, `dataLocator`) that names

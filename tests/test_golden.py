@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
@@ -108,6 +109,30 @@ class TestGolden(unittest.TestCase):
         lines = message.splitlines()
         self.assertTrue(any(line.startswith("-") for line in lines), message)
         self.assertTrue(any(line.startswith("+") for line in lines), message)
+
+    def test_leaf_whitespace_significant(self):
+        with_space = canonicalize(b"<fcpxml><title> </title></fcpxml>")
+        empty = canonicalize(b"<fcpxml><title/></fcpxml>")
+        self.assertNotEqual(with_space, empty)
+        self.assertEqual(
+            canonicalize(b"<fcpxml> <title/> </fcpxml>"),
+            canonicalize(b"<fcpxml><title/></fcpxml>"),
+        )
+
+    def test_malformed_golden_reports_assertion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            golden_dir = Path(tmp) / "goldens"
+            with mock.patch.dict(os.environ, {"GOLDEN_UPDATE": "1"}):
+                assert_golden(ORDER_A, "clip", golden_dir=golden_dir)
+            golden_path = golden_dir / "clip.fcpxml"
+            golden_path.write_text("<fcpxml><unclosed>", encoding="utf-8")
+            with without_golden_update():
+                with self.assertRaises(AssertionError) as ctx:
+                    assert_golden(ORDER_A, "clip", golden_dir=golden_dir)
+            message = str(ctx.exception)
+            self.assertIn(str(golden_path), message)
+            self.assertIn("@@", message)
+            self.assertIsInstance(ctx.exception.__cause__, ET.ParseError)
 
     def test_dtd_skips_when_missing(self):
         missing = "/nonexistent/FCPXMLv1_14.dtd"

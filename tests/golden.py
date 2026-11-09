@@ -156,7 +156,10 @@ def _append_element(element, level, lines):
         for name, value in sorted(element.attrib.items())
     )
     children = list(element)
-    text = None if _blank(element.text) else element.text
+    if _blank(element.text):
+        text = element.text if (not children and element.text) else None
+    else:
+        text = element.text
     if not children and text is None:
         lines.append("%s<%s%s/>" % (indent, element.tag, attributes))
         return
@@ -198,7 +201,11 @@ def _describe(element):
 
 
 def _effective_text(element):
-    return None if _blank(element.text) else element.text
+    if _blank(element.text):
+        if len(element) == 0 and element.text:
+            return element.text
+        return None
+    return element.text
 
 
 def _effective_tail(element):
@@ -269,7 +276,12 @@ def assert_golden(xml_bytes, name, *, golden_dir=None):
         fromfile=str(golden_path),
         tofile="actual",
     ))
-    tag, path = _first_difference(xml_bytes, expected)
+    try:
+        tag, path = _first_difference(xml_bytes, expected)
+    except ET.ParseError as exc:
+        raise AssertionError(
+            "malformed golden file %s: %s\n%s" % (golden_path, exc, diff)
+        ) from exc
     raise AssertionError(
         "golden mismatch for %s: first difference at <%s> (path %s)\n%s"
         % (golden_path, tag, path, diff)
