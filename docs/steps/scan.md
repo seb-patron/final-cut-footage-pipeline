@@ -17,7 +17,9 @@ For every clip it reads, read-only, with the `ffprobe` and `exiftool`
 tools:
 
 - how long it is and its exact frame rate,
-- its start timecode,
+- its start timecode: the first non-empty `timecode` tag found in the
+  format tags, then every video stream's tags in order, then every data
+  stream's tags in order (a QuickTime `tmcd` track is a data stream),
 - the camera that shot it,
 - its GPS position, when the camera recorded one,
 - when it was captured, and how that time was learned (see below).
@@ -77,7 +79,11 @@ only that clip is probed again.
 ## A clip that cannot be read is kept, not dropped
 
 A file the reader cannot open is recorded as unreadable and reported,
-one line per file, and the run goes on with the rest. The file keeps a
+one line per file, and the run goes on with the rest — but only after
+the scan re-checks the file is unchanged. A file whose size or
+modification time changed while the probe was running stops the run
+with exit 1 instead, even when the probe itself failed, so a half-read
+fact is never recorded as just unreadable. The file keeps a
 placeholder row with no duration, so a later scan retries it, and a
 clip that already had a row keeps that row untouched. Unreadable files
 never fail the run: the scan still finishes and its summary still

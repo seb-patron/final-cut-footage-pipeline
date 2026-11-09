@@ -212,7 +212,8 @@ def scan_catalog(
     folders when ``settings`` is given. A missing tool raises
     :class:`ProbeError` naming the tool before anything is marked; a
     file that cannot be read is recorded as unreadable and the run goes
-    on. A file that changed while it was probed stops the run.
+    on. A file that changed while it was probed stops the run, even
+    when the probe itself failed.
     """
     for tool in PROBE_TOOLS:
         if shutil.which(tool) is None:
@@ -264,20 +265,12 @@ def scan_catalog(
                 )
             )
             continue
+        probe_error: ProbeError | None = None
         try:
             facts = probe(display)  # type: ignore[operator]
         except ProbeError as exc:
-            if existing is None:
-                _unreadable_row(catalog, _scan_asset_id(key), display)
-            entries.append(
-                ScanEntry(
-                    path=display,
-                    resolved=key,
-                    status="unreadable",
-                    reason=str(exc),
-                )
-            )
-            continue
+            facts = None
+            probe_error = exc
         try:
             after = os.stat(display)
         except OSError as exc:
@@ -289,6 +282,19 @@ def scan_catalog(
             or after.st_mtime_ns != before.st_mtime_ns
         ):
             raise ProbeError(f"file changed during scan: {display}")
+        if probe_error is not None:
+            if existing is None:
+                _unreadable_row(catalog, _scan_asset_id(key), display)
+            entries.append(
+                ScanEntry(
+                    path=display,
+                    resolved=key,
+                    status="unreadable",
+                    reason=str(probe_error),
+                )
+            )
+            continue
+        assert facts is not None
         capture_text, source, verified = capture_time_for(facts, display, before)
         parts = [part for part in (facts.make, facts.model) if part]
         camera = " ".join(parts) if parts else None

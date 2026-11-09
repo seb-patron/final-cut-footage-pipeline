@@ -171,6 +171,43 @@ def _parse_exif_date(text: object) -> str | None:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _find_timecode_text(data: dict, video: list[dict]) -> object:
+    """Return the first non-empty ``timecode`` tag value, or None.
+
+    The lookup order is fixed: the format tags first, then every
+    video stream's tags in stream order, then every data stream's
+    tags (codec_type ``"data"``, e.g. a QuickTime tmcd track) in
+    stream order. A value that is None or an empty string is
+    skipped; the first other value wins, even when it later fails
+    to parse.
+    """
+    candidates: list[object] = []
+    container = data.get("format")
+    if isinstance(container, dict):
+        container_tags = container.get("tags")
+        if isinstance(container_tags, dict):
+            candidates.append(container_tags.get("timecode"))
+    for stream in video:
+        tags = stream.get("tags") if isinstance(stream, dict) else None
+        if isinstance(tags, dict):
+            candidates.append(tags.get("timecode"))
+    streams = data.get("streams")
+    if isinstance(streams, list):
+        for stream in streams:
+            if (
+                isinstance(stream, dict)
+                and stream.get("codec_type") == "data"
+            ):
+                tags = stream.get("tags")
+                if isinstance(tags, dict):
+                    candidates.append(tags.get("timecode"))
+    for candidate in candidates:
+        if candidate is None or candidate == "":
+            continue
+        return candidate
+    return None
+
+
 def _parse_number(value: object) -> float | None:
     """Return a JSON value as a float, or None when it is not numeric."""
     if isinstance(value, bool):
@@ -216,9 +253,12 @@ def probe_file(path: str | os.PathLike[str], *, runner: object = None) -> ProbeF
 
     Runs ``ffprobe`` for duration, frame rate, timecode, stream counts
     and pixel size, and ``exiftool`` for camera, GPS and capture date.
-    A missing tool raises :class:`ProbeError` naming the tool; an
-    unreadable file raises :class:`ProbeError` naming the path. Missing
-    exiftool fields stay None.
+    The start timecode is the first non-empty ``timecode`` tag found
+    in the format tags, then every video stream's tags in order, then
+    every data stream's tags in order. A missing tool raises
+    :class:`ProbeError` naming the tool; an unreadable file raises
+    :class:`ProbeError` naming the path. Missing exiftool fields stay
+    None.
     """
     display = os.fspath(path)
     ffprobe = shutil.which("ffprobe")
@@ -287,15 +327,7 @@ def probe_file(path: str | os.PathLike[str], *, runner: object = None) -> ProbeF
         )
 
     start_timecode: Fraction | None = None
-    tags = first.get("tags")
-    timecode_text = tags.get("timecode") if isinstance(tags, dict) else None
-    if timecode_text is None and isinstance(container, dict):
-        container_tags = container.get("tags")
-        timecode_text = (
-            container_tags.get("timecode")
-            if isinstance(container_tags, dict)
-            else None
-        )
+    timecode_text = _find_timecode_text(data, video)
     if timecode_text is not None:
         if not isinstance(timecode_text, str):
             raise ProbeError(

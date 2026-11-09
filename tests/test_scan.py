@@ -2,10 +2,12 @@
 
 import contextlib
 import io
+import json
 import os
 import shutil
 import socket
 import tempfile
+import types
 import unittest
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -142,6 +144,111 @@ class TestScan(unittest.TestCase):
             with self.subTest("ntsc hour"):
                 self.assertEqual(
                     ntsc_row.start_timecode, Fraction(18018, 5)
+                )
+
+    def ffprobe_payload(
+        self, *, format_tags=None, video_tags=None, data_tags=(),
+        rate="25/1",
+    ):
+        """Build a fake ffprobe document with the given tag dicts."""
+        if video_tags is None:
+            video_tags = ({},)
+        streams = []
+        for tags in video_tags:
+            streams.append(
+                {
+                    "codec_type": "video",
+                    "r_frame_rate": rate,
+                    "width": 64,
+                    "height": 36,
+                    "tags": tags,
+                }
+            )
+        for tags in data_tags:
+            streams.append({"codec_type": "data", "tags": tags})
+        return {
+            "streams": streams,
+            "format": {"duration": "1.0", "tags": format_tags or {}},
+        }
+
+    def probe_with_payload(self, payload):
+        """Run probe_file on a stub serving mocked ffprobe output."""
+        def fake_runner(cmd, **kwargs):
+            if "-show_format" in cmd:
+                return types.SimpleNamespace(
+                    returncode=0, stdout=json.dumps(payload)
+                )
+            return types.SimpleNamespace(returncode=0, stdout="[]")
+
+        with mock.patch("shutil.which", return_value="/fake/tool"):
+            return probe_file("clip.mov", runner=fake_runner)
+
+    def test_start_timecode_lookup_order(self):
+        cases = [
+            (
+                "format tags only",
+                dict(format_tags={"timecode": "01:00:00:00"}),
+                Fraction(3600, 1),
+            ),
+            (
+                "video stream tags only",
+                dict(video_tags=({"timecode": "01:00:00:00"},)),
+                Fraction(3600, 1),
+            ),
+            (
+                "data stream tags only",
+                dict(
+                    video_tags=({},),
+                    data_tags=({"timecode": "01:00:00:00"},),
+                ),
+                Fraction(3600, 1),
+            ),
+            (
+                "format beats video and data",
+                dict(
+                    format_tags={"timecode": "00:00:10:00"},
+                    video_tags=({"timecode": "01:00:00:00"},),
+                    data_tags=({"timecode": "02:00:00:00"},),
+                ),
+                Fraction(10, 1),
+            ),
+            (
+                "first video beats second video and data",
+                dict(
+                    video_tags=(
+                        {"timecode": "00:00:10:00"},
+                        {"timecode": "01:00:00:00"},
+                    ),
+                    data_tags=({"timecode": "02:00:00:00"},),
+                ),
+                Fraction(10, 1),
+            ),
+            (
+                "empty video tag falls through to data",
+                dict(
+                    video_tags=({"timecode": ""},),
+                    data_tags=({"timecode": "01:00:00:00"},),
+                ),
+                Fraction(3600, 1),
+            ),
+        ]
+        for label, kwargs, expected in cases:
+            with self.subTest(label):
+                facts = self.probe_with_payload(
+                    self.ffprobe_payload(**kwargs)
+                )
+                self.assertEqual(facts.start_timecode, expected)
+        with self.subTest("no timecode anywhere"):
+            facts = self.probe_with_payload(
+                self.ffprobe_payload(video_tags=({},))
+            )
+            self.assertIsNone(facts.start_timecode)
+        with self.subTest("non-string timecode is rejected"):
+            with self.assertRaises(ProbeError):
+                self.probe_with_payload(
+                    self.ffprobe_payload(
+                        data_tags=({"timecode": 42},)
+                    )
                 )
 
     def test_capture_time_prefers_quicktime_date(self):
@@ -307,6 +414,82 @@ class TestScan(unittest.TestCase):
             )
             self.assertEqual(broken.read_bytes(), before_bytes)
             self.assertEqual(os.stat(broken).st_mtime_ns, before_mtime)
+
+    def test_failed_probe_after_change_stops_run(self):
+        require_tools("ffprobe", "exiftool")
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, places = self.make_project(tmp)
+            target = places["footage"] / "clip-changing.mov"
+            target.write_bytes(b"stub-bytes")
+
+            def mutating_probe(path, *, runner=None):
+                info = os.stat(os.fspath(path))
+                os.utime(
+                    os.fspath(path),
+                    (info.st_atime, info.st_mtime + 2),
+                )
+                raise ProbeError(
+                    "cannot read %s: boom" % os.fspath(path)
+                )
+
+            with Catalog.open(settings) as catalog:
+                with self.assertRaisesRegex(
+                    ProbeError, "file changed during scan"
+                ):
+                    scan_catalog(
+                        catalog, settings, probe=mutating_probe
+                    )
+                self.assertEqual(catalog.list_media(), [])
+            with contextlib.redirect_stderr(io.StringIO()):
+                with mock.patch.object(
+                    fcp_pipeline.scan.scan_catalog,
+                    "__kwdefaults__",
+                    {"probe": mutating_probe},
+                ):
+                    code = main(
+                        ["--trip", os.fspath(places["project"])]
+                    )
+            self.assertEqual(code, 1)
+            with Catalog.open(settings) as catalog:
+                self.assertEqual(catalog.list_media(), [])
+
+    def test_failed_probe_unchanged_is_unreadable(self):
+        require_tools("ffprobe", "exiftool")
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, places = self.make_project(tmp)
+            target = places["footage"] / "clip-broken.mov"
+            target.write_bytes(b"stub-bytes")
+            calls = []
+
+            def failing_probe(path, *, runner=None):
+                calls.append(os.fspath(path))
+                raise ProbeError(
+                    "cannot read %s: boom" % os.fspath(path)
+                )
+
+            with Catalog.open(settings) as catalog:
+                result = scan_catalog(
+                    catalog, settings, probe=failing_probe
+                )
+                self.assertEqual(result.unreadable, 1)
+                self.assertEqual(
+                    result.unreadable_paths, (os.fspath(target),)
+                )
+                row = catalog.get_media(target)
+                self.assertIsNotNone(row)
+                assert row is not None
+                self.assertIsNone(row.duration)
+                again = scan_catalog(
+                    catalog, settings, probe=failing_probe
+                )
+                self.assertEqual(again.unreadable, 1)
+                kept = catalog.get_media(target)
+                self.assertIsNotNone(kept)
+                assert kept is not None
+                self.assertIsNone(kept.duration)
+            self.assertEqual(calls, [os.fspath(target)] * 2)
 
     def test_media_mtime_unchanged(self):
         require_tools("ffmpeg", "ffprobe", "exiftool")
