@@ -16,7 +16,7 @@ from pathlib import Path
 #: A bullet marker: "- ", "* " or "+ " at the start of the stripped line.
 BULLET_MARKERS = ("- ", "* ", "+ ")
 
-_HEADING_RE = re.compile(r"^(#{1,6})(?=[ \t]|$)")
+_HEADING_RE = re.compile(r"^(#{1,6})(?= |$)")
 _CLOSING_HASHES_RE = re.compile(r"[ \t]+#+[ \t]*$")
 _NUMBERED_TITLE_RE = re.compile(r"^\d+[.)][ \t]+")
 
@@ -54,9 +54,9 @@ class Section:
 def _parse_heading(line: str) -> tuple[int, str] | None:
     """Return ``(level, raw_text)`` for an ATX heading line, else None.
 
-    One to six ``#`` characters at the start of the line, then a space,
-    a tab, or the end of the line. ``##Title`` and ``####### x`` are
-    not headings.
+    One to six ``#`` characters at the start of the line, then a space
+    or the end of the line. ``##Title``, ``##\tTabbed`` and
+    ``####### x`` are not headings.
     """
     match = _HEADING_RE.match(line)
     if match is None:

@@ -116,6 +116,18 @@ class TestOutline(unittest.TestCase):
         self.assertEqual(raised.exception.line, 3)
         self.assertTrue(str(raised.exception).startswith("outline.md line 3:"))
 
+    def test_tab_after_marker_is_not_heading(self):
+        with self.assertRaises(OutlineError) as raised:
+            parse_outline("##\tTabbed\n- wish\n")
+        self.assertEqual(raised.exception.line, 1)
+        self.assertIn("no section headings found", str(raised.exception))
+
+    def test_tabbed_level_two_does_not_take_precedence(self):
+        text = "# First\n- wish one\n\n# Second\n- wish two\n\n##\tTabbed\n"
+        sections = parse_outline(text)
+        self.assertEqual([s.title for s in sections], ["First", "Second"])
+        self.assertIn("##\tTabbed", sections[1].notes)
+
     def test_numbered_heading_title(self):
         text = "## 3. Cold open\n- One wish\n\n## 10 things I packed\n- Another wish\n"
         sections = parse_outline(text)

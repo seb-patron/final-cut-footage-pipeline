@@ -10,7 +10,8 @@ here.
 ## Which headings become sections
 
 Headings are lines that start with one to six `#` characters followed
-by a space, a tab, or the end of the line (`## Cold open`). The step uses
+by a space or the end of the line (`## Cold open`); a tab or any other
+whitespace after the marker does not make a heading. The step uses
 your level-2 headings (`## ...`) as the sections. A level-1 heading
 (`# ...`) at the top is treated as the outline's title and is not a
 section.
