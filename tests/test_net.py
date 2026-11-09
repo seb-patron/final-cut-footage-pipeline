@@ -267,6 +267,96 @@ class TestNet(unittest.TestCase):
             self.assertFalse(capture.exists())
             self.assertNoSocketUse()
 
+    def test_renamed_pipeline_between_open_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Phase A: empty .pipeline moved outside between the directory
+            # open and the file open. The new file this call creates must
+            # be removed, nothing may be written outside, and the request
+            # itself still runs.
+            trip = write_trip(tmp_path / "moved-new")
+            gate = NetworkGate(load_trip(trip), "scan")
+            (trip / ".pipeline").mkdir()
+            outside = tmp_path / "outside-new"
+            outside.mkdir()
+            moved = outside / ".pipeline"
+            real_open = os.open
+
+            def sneak_new(path, flags, *args, **kwargs):
+                if (
+                    os.fspath(path) == net.LOG_NAME
+                    and kwargs.get("dir_fd") is not None
+                ):
+                    try:
+                        (trip / net.PIPELINE_DIR_NAME).rename(moved)
+                    except OSError:
+                        pass
+                return real_open(path, flags, *args, **kwargs)
+
+            seen = []
+
+            def request():
+                seen.append(True)
+                return "ok"
+
+            with mock.patch("os.open", new=sneak_new):
+                with self.assertRaises(RuntimeError) as raised:
+                    gate.call("openai", "test-model", [("text", 5)], request)
+            self.assertEqual(
+                str(raised.exception),
+                "refusing to write the network log outside the project folder",
+            )
+            self.assertEqual(seen, [True])
+            self.assertFalse((moved / net.LOG_NAME).exists())
+            self.assertEqual(list(moved.iterdir()), [])
+            self.assertNoSocketUse()
+
+            # Phase B: an existing log moved outside in the same window.
+            # The moved log must be left alone (not deleted) and gain no
+            # new line.
+            trip2 = write_trip(tmp_path / "moved-existing")
+            gate2 = NetworkGate(load_trip(trip2), "scan")
+            self.assertEqual(
+                gate2.call("openai", "test-model", [("text", 5)], lambda: "ok"),
+                "ok",
+            )
+            before = read_log_text(trip2)
+            moved_parent = tmp_path / "outside-existing"
+            moved_parent.mkdir()
+            moved2 = moved_parent / ".pipeline"
+
+            def sneak_existing(path, flags, *args, **kwargs):
+                if (
+                    os.fspath(path) == net.LOG_NAME
+                    and kwargs.get("dir_fd") is not None
+                ):
+                    try:
+                        (trip2 / net.PIPELINE_DIR_NAME).rename(moved2)
+                    except OSError:
+                        pass
+                return real_open(path, flags, *args, **kwargs)
+
+            seen2 = []
+
+            def request2():
+                seen2.append(True)
+                return "ok"
+
+            with mock.patch("os.open", new=sneak_existing):
+                with self.assertRaises(RuntimeError) as raised2:
+                    gate2.call(
+                        "openai", "test-model", [("text", 5)], request2
+                    )
+            self.assertEqual(
+                str(raised2.exception),
+                "refusing to write the network log outside the project folder",
+            )
+            self.assertEqual(seen2, [True])
+            self.assertEqual(
+                (moved2 / net.LOG_NAME).read_text(encoding="utf-8"), before
+            )
+            self.assertNoSocketUse()
+
     def test_offline_call_from_command_exits_3(self):
         marker = "UNIQUE-MARKER-OFFLINE-CINNABAR-1a2b3c4d"
         prompt_text = f"draft a shot list for {marker} at dawn"

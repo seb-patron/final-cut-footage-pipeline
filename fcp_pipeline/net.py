@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import errno
 import os
+import stat
 import subprocess
 import sys
 
@@ -208,8 +209,15 @@ class NetworkGate:
         The log is opened relative to directory file descriptors with
         ``O_NOFOLLOW`` at every component under the project folder, so a
         ``.pipeline`` directory or log file swapped for a symlink is
-        refused instead of followed. There is no check-then-open step to
-        race: the kernel resolves each component exactly once.
+        refused instead of followed. After the log file is opened, the
+        opened ``.pipeline`` directory is re-verified with ``fstat`` and
+        ``fstatat`` (``os.fstat`` against ``os.stat`` with ``dir_fd`` and
+        ``follow_symlinks=False``): it must still be the project's own
+        ``.pipeline`` (same ``st_dev`` and ``st_ino`` as
+        ``root_fd/.pipeline``). A rename or swap of ``.pipeline`` between
+        the directory open and the file open therefore fails closed: only
+        the file this call just created is removed, nothing is written,
+        and a refusal is raised.
         """
         folder = os.fspath(getattr(self._settings, "folder"))
         now = (
@@ -226,10 +234,23 @@ class NetworkGate:
             "refusing to write the network log outside the project folder"
         )
         try:
-            base_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            base_fd = os.open(
+                folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
         except FileNotFoundError:
             os.makedirs(folder, exist_ok=True)
-            base_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                base_fd = os.open(
+                    folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                )
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise refusal from None
+                raise
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise refusal from None
+            raise
         try:
             try:
                 pipeline_fd = os.open(
@@ -257,19 +278,77 @@ class NetworkGate:
                     raise refusal from None
                 raise
             try:
+                created = False
                 try:
                     log_fd = os.open(
                         LOG_NAME,
-                        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | os.O_APPEND
+                        | os.O_NOFOLLOW,
                         0o666,
                         dir_fd=pipeline_fd,
                     )
+                    created = True
+                except FileExistsError:
+                    try:
+                        log_fd = os.open(
+                            LOG_NAME,
+                            os.O_WRONLY
+                            | os.O_CREAT
+                            | os.O_APPEND
+                            | os.O_NOFOLLOW,
+                            0o666,
+                            dir_fd=pipeline_fd,
+                        )
+                    except OSError as exc:
+                        if exc.errno in (errno.ELOOP, errno.EISDIR):
+                            raise refusal from None
+                        raise
                 except OSError as exc:
                     if exc.errno in (errno.ELOOP, errno.EISDIR):
                         raise refusal from None
                     raise
-                with os.fdopen(log_fd, "a", encoding="utf-8") as handle:
-                    handle.write(line if handle.tell() else LOG_HEADER + line)
+                try:
+                    try:
+                        current = os.stat(
+                            PIPELINE_DIR_NAME,
+                            dir_fd=base_fd,
+                            follow_symlinks=False,
+                        )
+                    except OSError:
+                        current = None
+                    opened = os.fstat(pipeline_fd)
+                    if (
+                        current is None
+                        or current.st_ino != opened.st_ino
+                        or current.st_dev != opened.st_dev
+                        or not stat.S_ISDIR(current.st_mode)
+                    ):
+                        try:
+                            os.close(log_fd)
+                        except OSError:
+                            pass
+                        log_fd = None
+                        if created:
+                            try:
+                                os.unlink(LOG_NAME, dir_fd=pipeline_fd)
+                            except OSError:
+                                pass
+                        raise refusal from None
+                    is_new = created or os.fstat(log_fd).st_size == 0
+                    handle = os.fdopen(log_fd, "a", encoding="utf-8")
+                    log_fd = None
+                    with handle:
+                        handle.write(LOG_HEADER + line if is_new else line)
+                finally:
+                    if log_fd is not None:
+                        try:
+                            os.close(log_fd)
+                        except OSError:
+                            pass
+                        log_fd = None
             finally:
                 os.close(pipeline_fd)
         finally:

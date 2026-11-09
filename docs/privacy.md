@@ -43,10 +43,15 @@ Every call, whether it was sent, failed, or refused while offline,
 appends exactly one line to `.pipeline/network-log.tsv` inside the trip
 folder. The file is created with a header line the first time it is
 needed, and it is only ever appended to, never rewritten. The folder is
-created if it is missing. The log is opened without following symlinks:
-if `.pipeline` or the log file itself is a symlink, the write is refused
-rather than followed, so a swapped link can never redirect the log
-outside the trip folder.
+created if it is missing. The log is opened relative to directory file
+descriptors with `O_NOFOLLOW` at every component under the trip folder
+(openat-style via `dir_fd`), so if `.pipeline` or the log file itself is
+a symlink, the write is refused rather than followed, and a swapped link
+can never redirect the log outside the trip folder. After the log file is
+opened, the opened `.pipeline` directory is re-verified with `fstat` and
+`fstatat` (same `st_dev` and `st_ino` as `root_fd/.pipeline`); if that
+check fails, only the file this call just created is removed, nothing is
+written, and the call raises a refusal instead.
 
 Columns, in order:
 
@@ -67,6 +72,41 @@ An example line (fields separated by tabs):
 
 Request text, response text, and passwords never go in the log. Only
 counts and sizes do.
+
+## Threat model: a single-user tool on your own Mac
+
+This is a single-user tool on the editor's own Mac. The layers are meant
+to stop mistakes and stale configuration, not a live adversary on the same
+machine:
+
+- symlinks anywhere in the path at open time: a `.pipeline` directory or
+  log file swapped for a symlink is refused instead of followed;
+- `".."` and absolute paths that would escape the trip folder: the log
+  path is two fixed names (`.pipeline`, `network-log.tsv`) opened
+  relative to the project-root directory fd, never by joining
+  user-supplied paths;
+- protected-root overlap: the log can only ever land inside the trip
+  folder's own `.pipeline`, never outside it;
+- overwrites: the log is append-only and never rewritten;
+- numbering collisions: the log file is created with `O_EXCL` tracking so
+  the code knows whether this call created it, instead of guessing from
+  names or sizes.
+
+The layers must also never delete or overwrite anything. The only removal
+the gate ever does is deleting the log file this same call just created
+when its post-open check fails; it never touches a pre-existing file.
+
+A concurrent process that actively renames or swaps directories in the
+middle of an operation is out of scope: no local check can close that
+race completely. The gate still uses the strongest practical method: it
+opens every path component from the project-root directory fd with
+`O_NOFOLLOW` (openat-style via `dir_fd`), and after opening it
+re-verifies with `fstat`/`fstatat` that the opened directory is still the
+project's own `.pipeline` (same `st_dev` and `st_ino` as
+`root_fd/.pipeline`). If that check fails, it removes only the file this
+call just created, raises
+`refusing to write the network log outside the project folder`, and
+writes nothing else.
 
 ## Where the keys come from, and that they are never written down
 
