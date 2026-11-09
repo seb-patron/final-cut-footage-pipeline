@@ -99,6 +99,51 @@ nothing. A finished run prints one line per problem clip (`failed:` or
   wrongly (the `--trip` folder is required).
 - `3`: `ffprobe` is missing.
 
+## Reusing results you already have
+
+If you already ran Whisper on this trip outside the pipeline and kept
+the JSON result files, you can file them into the catalog instead of
+listening to everything again:
+
+```
+python3 -m fcp_pipeline.transcribe --trip <folder> --import <results folder>
+```
+
+`<results folder>` is an ordinary folder holding one `.json` file per
+clip. Each file keeps the shape Whisper wrote: an object with a
+`segments` list (each segment has a `start`, an `end`, a `text`, and
+optionally a `words` list), an optional `language`, and a top-level
+`duration` in seconds. Batch result files that wrap that shape work
+too: the clip length is then read from the asset's duration, or from
+the last segment's end when the asset carries none. A result that
+carries no duration anywhere is listed as unmatched, never guessed.
+
+A result belongs to the clip whose file name it shares: `harbor-a.json`
+goes with `harbor-a.mov` (the extension may be kept, as in
+`harbor-b.mov.json`, and upper and lower case match), and the result's
+length must agree with the clip's length to within one video frame.
+Anything else is listed, one line per result, with the reason:
+
+```
+unmatched: no-such-clip.json: no clip named no-such-clip in the catalog
+imported 0, skipped 0, unmatched 1, stale 0, failed 0
+```
+
+Clips that changed since the scan are left alone, exactly as with a
+fresh transcription. An imported clip counts as done: running the plain
+transcribe command later skips it, and its transcript rows are marked
+as imported, since the model that first produced them is unknown.
+
+The import never runs the speech model, never needs `mlx-whisper` or
+`ffprobe`, and never touches the network. It only reads your results
+folder and your footage, and it only writes the same three transcript
+files and catalog rows a transcription would. With `--dry-run` it
+reports what it would file (`would-import`) and writes nothing. The
+import exits `0` when the run completed (listed results do not fail
+it), `1` when the trip, the catalog, or the results folder could not
+be read, and `2` when the command was used wrongly; there is no code
+`3`, because the import never needs `ffprobe`.
+
 ## How a crash resumes
 
 The catalog record for a clip is written only after its three files,

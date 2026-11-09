@@ -509,13 +509,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Report what would be transcribed without writing anything.",
     )
+    parser.add_argument(
+        "--import",
+        dest="import_dir",
+        default=None,
+        metavar="FOLDER",
+        help="Import existing mlx-whisper JSON results from FOLDER.",
+    )
     args = parser.parse_args(argv)
     try:
         settings = load_trip(args.trip)
     except TripSettingsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    if not args.dry_run and not whisper_local.available():
+    if args.import_dir is None and not args.dry_run and not whisper_local.available():
         print(f"error: {whisper_local.INSTALL_HINT}", file=sys.stderr)
         return 2
     try:
@@ -524,6 +531,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:
+        if args.import_dir is not None:
+            from fcp_pipeline import transcribe_import
+
+            try:
+                imported = transcribe_import.import_results(
+                    catalog, settings, args.import_dir, dry_run=args.dry_run
+                )
+            except (CatalogError, SafeWriteError, OSError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            for entry in imported.entries:
+                if (
+                    entry.status in ("unmatched", "stale", "failed")
+                    and entry.reason is not None
+                ):
+                    print(f"{entry.status}: {entry.name}: {entry.reason}")
+            print(imported.outcome)
+            return 0
         try:
             result = transcribe_catalog(
                 catalog, settings, dry_run=args.dry_run
