@@ -32,7 +32,9 @@ There are two ways to go offline, and they add up:
 
 When the switch is on, every call is refused with a clear message before
 any connection is made, naming the step and the service and telling you
-how to switch it back on. Going offline never deletes or rewrites the
+how to switch it back on. A command whose step tries a network call while
+offline prints that message as a single line on stderr and exits 3, with
+no traceback. Going offline never deletes or rewrites the
 log; it just adds refusal lines.
 
 ## The log: what is written, and what never is
@@ -41,7 +43,10 @@ Every call, whether it was sent, failed, or refused while offline,
 appends exactly one line to `.pipeline/network-log.tsv` inside the trip
 folder. The file is created with a header line the first time it is
 needed, and it is only ever appended to, never rewritten. The folder is
-created if it is missing.
+created if it is missing. The log is opened without following symlinks:
+if `.pipeline` or the log file itself is a symlink, the write is refused
+rather than followed, so a swapped link can never redirect the log
+outside the trip folder.
 
 Columns, in order:
 

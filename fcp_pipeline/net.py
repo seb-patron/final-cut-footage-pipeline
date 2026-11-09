@@ -17,10 +17,10 @@ runs without either SDK installed.
 from __future__ import annotations
 
 import datetime
+import errno
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 #: Environment variables read first for API keys.
 OPENAI_ENV_VAR = "OPENAI_API_KEY"
@@ -30,6 +30,8 @@ OPENAI_KEYCHAIN_SERVICE = "fcp-pipeline-openai"
 ANTHROPIC_KEYCHAIN_SERVICE = "fcp-pipeline-anthropic"
 #: Keychain reader; only ever executed on macOS.
 SECURITY_BIN = "/usr/bin/security"
+#: Directory holding the log file inside ``<project>/``.
+PIPELINE_DIR_NAME = ".pipeline"
 #: Log file name inside ``<project>/.pipeline/``.
 LOG_NAME = "network-log.tsv"
 #: Header written once when the log file is created.
@@ -200,34 +202,16 @@ class NetworkGate:
             "to switch it back on"
         )
 
-    def _log_targets(self) -> tuple[Path, Path]:
-        """Return the (pipeline dir, log path) after a containment check.
-
-        Raises before creating anything when ``.pipeline/`` or the log
-        would resolve outside the project folder.
-        """
-        folder = Path(getattr(self._settings, "folder"))
-        folder_resolved = folder.resolve()
-        pipeline_dir = folder / ".pipeline"
-        log_path = pipeline_dir / LOG_NAME
-        pipeline_resolved = pipeline_dir.resolve()
-        log_resolved = log_path.resolve()
-        if not pipeline_resolved.is_relative_to(folder_resolved):
-            raise RuntimeError(
-                "refusing to write the network log outside the project folder"
-            )
-        if not log_resolved.is_relative_to(folder_resolved):
-            raise RuntimeError(
-                "refusing to write the network log outside the project folder"
-            )
-        return pipeline_dir, log_path
-
     def _append_log(self, service: str, model: str, summary: str, outcome: str) -> None:
-        """Append one content-free line to ``.pipeline/network-log.tsv``."""
-        pipeline_dir, log_path = self._log_targets()
-        pipeline_dir.mkdir(parents=True, exist_ok=True)
-        # Re-check after creating: a swapped symlink must still refuse.
-        self._log_targets()
+        """Append one content-free line to ``.pipeline/network-log.tsv``.
+
+        The log is opened relative to directory file descriptors with
+        ``O_NOFOLLOW`` at every component under the project folder, so a
+        ``.pipeline`` directory or log file swapped for a symlink is
+        refused instead of followed. There is no check-then-open step to
+        race: the kernel resolves each component exactly once.
+        """
+        folder = os.fspath(getattr(self._settings, "folder"))
         now = (
             datetime.datetime.now(datetime.timezone.utc)
             .isoformat(timespec="seconds")
@@ -238,11 +222,58 @@ class NetworkGate:
             f"\t{_sanitize_field(service)}\t{_sanitize_field(model)}"
             f"\t{_sanitize_field(summary)}\t{_sanitize_field(outcome)}\n"
         )
-        creating = not log_path.exists()
-        with open(log_path, "a", encoding="utf-8") as handle:
-            if creating:
-                handle.write(LOG_HEADER)
-            handle.write(line)
+        refusal = RuntimeError(
+            "refusing to write the network log outside the project folder"
+        )
+        try:
+            base_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+        except FileNotFoundError:
+            os.makedirs(folder, exist_ok=True)
+            base_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            try:
+                pipeline_fd = os.open(
+                    PIPELINE_DIR_NAME,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=base_fd,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(PIPELINE_DIR_NAME, 0o777, dir_fd=base_fd)
+                except FileExistsError:
+                    pass
+                try:
+                    pipeline_fd = os.open(
+                        PIPELINE_DIR_NAME,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=base_fd,
+                    )
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise refusal from None
+                    raise
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise refusal from None
+                raise
+            try:
+                try:
+                    log_fd = os.open(
+                        LOG_NAME,
+                        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                        0o666,
+                        dir_fd=pipeline_fd,
+                    )
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.EISDIR):
+                        raise refusal from None
+                    raise
+                with os.fdopen(log_fd, "a", encoding="utf-8") as handle:
+                    handle.write(line if handle.tell() else LOG_HEADER + line)
+            finally:
+                os.close(pipeline_fd)
+        finally:
+            os.close(base_fd)
 
     def call(self, service: str, model: str, sent, request):
         """Run ``request()`` and return its result, logging one line.

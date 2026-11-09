@@ -12,7 +12,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .net import set_offline
+from .net import OfflineError, set_offline
 
 MAIN_PATH_STEPS = (
     "scan",
@@ -120,6 +120,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if getattr(args, "offline", False):
         set_offline(True)
-    if args.command == "run":
-        return run_command(args.trip, args.dry_run)
-    return run_step(_find_step(args.command), args.trip, args.dry_run)
+    try:
+        if args.command == "run":
+            return run_command(args.trip, args.dry_run)
+        return run_step(_find_step(args.command), args.trip, args.dry_run)
+    except OfflineError as exc:
+        # A handler refused a network call while offline: report one line
+        # on stderr and exit 3, never a traceback.
+        print(" ".join(str(exc).split()), file=sys.stderr)
+        return NOT_BUILT_EXIT_CODE

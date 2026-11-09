@@ -8,6 +8,8 @@ reset after each test.
 """
 
 import ast
+import contextlib
+import io
 import os
 import socket
 import subprocess
@@ -188,24 +190,151 @@ class TestNet(unittest.TestCase):
 
     def test_log_line_has_no_content(self):
         marker = "UNIQUE-MARKER-ZEBRA-HARBOR-9f8e7d6c5b4a"
+        prompt_text = (
+            f"describe this harbor photo {marker} for the transcript index"
+        )
         with tempfile.TemporaryDirectory() as tmp:
             trip = write_trip(Path(tmp))
             gate = NetworkGate(load_trip(trip), "scan")
+            seen = []
+
+            def request():
+                # The request carries the prompt text; the gate must not log it.
+                seen.append(prompt_text)
+                return "canned-response"
+
             result = gate.call(
                 "openai",
                 "test-model",
-                [("image", 421888), ("text", len(marker))],
-                lambda: marker,
+                [("image", 421888), ("text", len(prompt_text))],
+                request,
             )
-            self.assertEqual(result, marker)
+            self.assertEqual(result, "canned-response")
+            self.assertEqual(seen, [prompt_text])
+
+            def failing_request():
+                raise RuntimeError(f"synthetic boom carrying prompt: {prompt_text}")
+
+            with self.assertRaises(RuntimeError) as raised:
+                gate.call(
+                    "openai",
+                    "test-model",
+                    [("image", 421888), ("text", len(prompt_text))],
+                    failing_request,
+                )
+            self.assertIn(marker, str(raised.exception))
             text = read_log_text(trip)
             lines = text.splitlines()
-            self.assertEqual(len(lines), 2)
+            self.assertEqual(len(lines), 3)
             self.assertEqual(lines[0], "time\tstep\tservice\tmodel\tsent\toutcome")
             self.assertIn("412 KB", lines[1])
             self.assertIn("characters", lines[1])
             self.assertIn("sent", lines[1].rsplit("\t", 1)[-1])
+            self.assertIn("failed", lines[2].rsplit("\t", 1)[-1])
             self.assertNotIn(marker, text)
+            self.assertNotIn(prompt_text, text)
+            self.assertNoSocketUse()
+
+    def test_pipeline_symlink_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_trip(Path(tmp))
+            gate = NetworkGate(load_trip(trip), "scan")
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (trip / ".pipeline").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(RuntimeError) as raised:
+                gate.call("openai", "test-model", [("text", 5)], lambda: "ok")
+            self.assertEqual(
+                str(raised.exception),
+                "refusing to write the network log outside the project folder",
+            )
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertNoSocketUse()
+
+    def test_log_symlink_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_trip(Path(tmp))
+            gate = NetworkGate(load_trip(trip), "scan")
+            (trip / ".pipeline").mkdir()
+            capture = Path(tmp) / "capture.tsv"
+            (trip / ".pipeline" / "network-log.tsv").symlink_to(capture)
+            with self.assertRaises(RuntimeError) as raised:
+                gate.call("openai", "test-model", [("text", 5)], lambda: "ok")
+            self.assertEqual(
+                str(raised.exception),
+                "refusing to write the network log outside the project folder",
+            )
+            self.assertFalse(capture.exists())
+            self.assertNoSocketUse()
+
+    def test_offline_call_from_command_exits_3(self):
+        marker = "UNIQUE-MARKER-OFFLINE-CINNABAR-1a2b3c4d"
+        prompt_text = f"draft a shot list for {marker} at dawn"
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_trip(Path(tmp))
+            seen = []
+
+            def fake_scan(trip_arg, dry_run):
+                gate = NetworkGate(load_trip(trip_arg), "scan")
+                seen.append(prompt_text)
+                return gate.call(
+                    "openai",
+                    "test-model",
+                    [("text", len(prompt_text))],
+                    lambda: "ok",
+                )
+
+            original = cli.STEPS
+            try:
+                cli.STEPS = [
+                    cli.Step(
+                        step.name,
+                        step.main_path,
+                        (fake_scan if step.name == "scan" else None),
+                    )
+                    for step in original
+                ]
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = cli.main(["scan", "--trip", str(trip), "--offline"])
+            finally:
+                cli.STEPS = original
+            self.assertEqual(code, 3)
+            self.assertEqual(seen, [prompt_text])
+            lines = err.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("scan", lines[0])
+            self.assertIn("openai", lines[0])
+            self.assertNotIn("Traceback", err.getvalue())
+            self.assertNotIn(marker, read_log_text(trip))
+            self.assertNoSocketUse()
+
+    def test_offline_run_exits_3(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_trip(Path(tmp))
+
+            def fake_step(trip_arg, dry_run):
+                gate = NetworkGate(load_trip(trip_arg), "scan")
+                return gate.call(
+                    "openai", "test-model", [("text", 10)], lambda: "ok"
+                )
+
+            original = cli.STEPS
+            try:
+                cli.STEPS = [
+                    cli.Step(step.name, step.main_path, fake_step)
+                    for step in original
+                ]
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = cli.main(["run", "--trip", str(trip), "--offline"])
+            finally:
+                cli.STEPS = original
+            self.assertEqual(code, 3)
+            lines = err.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("scan", lines[0])
+            self.assertNotIn("Traceback", err.getvalue())
             self.assertNoSocketUse()
 
     def test_key_never_logged(self):
