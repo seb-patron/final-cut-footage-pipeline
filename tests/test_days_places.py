@@ -3,6 +3,7 @@
 import contextlib
 import io
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fcp_pipeline.catalog import Catalog, MediaRecord, TagRecord
 from fcp_pipeline.days_places import (
     DaysPlacesError,
+    _validate_places,
     assign_days_places,
     main,
     place_clusters,
@@ -382,7 +384,7 @@ class TestDays(unittest.TestCase):
                 assign_days_places(catalog, settings)
                 self.assertEqual(row_by_asset(catalog, "test-c").place,
                                  "Invented Cove")
-                clusters = place_clusters(catalog)
+                clusters = place_clusters(catalog, settings)
                 self.assertEqual(len(clusters), 3)
                 pair, lone, other_day = clusters
                 self.assertEqual((pair.day, pair.clip_count), (2, 2))
@@ -411,9 +413,158 @@ class TestDays(unittest.TestCase):
                         lon=44.0,
                     )
                 assign_days_places(catalog, settings)
-                clusters = place_clusters(catalog)
+                clusters = place_clusters(catalog, settings)
                 self.assertEqual(len(clusters), 1)
                 self.assertEqual(clusters[0].clip_count, 3)
+
+    def test_clusters_use_corrected_local_time(self):
+        try:
+            ZoneInfo("Pacific/Auckland")
+        except ZoneInfoNotFoundError:
+            self.skipTest("time zone database lacks Pacific/Auckland")
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_trip(
+                write_trip(
+                    tmp,
+                    trip_text(
+                        timezone="Pacific/Auckland",
+                        clock_offsets={"invented-cam-a": "+00:03:10"},
+                    ),
+                )
+            )
+            with Catalog.in_memory() as catalog:
+                add_media(
+                    catalog,
+                    "auckland",
+                    capture="2020-06-15T23:58:00Z",
+                    camera="invented-cam-a",
+                    lat=11.0,
+                    lon=44.0,
+                )
+                assign_days_places(catalog, settings)
+                self.assertEqual(
+                    row_by_asset(catalog, "test-auckland").day, 2
+                )
+                clusters = place_clusters(catalog, settings)
+                self.assertEqual(len(clusters), 1)
+                self.assertEqual(
+                    clusters[0].first_time, "2020-06-16T12:01:10"
+                )
+                self.assertEqual(
+                    clusters[0].last_time, "2020-06-16T12:01:10"
+                )
+                self.assertNotEqual(
+                    clusters[0].first_time, "2020-06-15T23:58:00"
+                )
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_trip(
+                write_trip(
+                    tmp,
+                    trip_text(
+                        clock_offsets={"invented-cam-a": "+02:00:00"}
+                    ),
+                )
+            )
+            with Catalog.in_memory() as catalog:
+                add_media(
+                    catalog,
+                    "early",
+                    capture="2020-06-16T10:00:00Z",
+                    camera="invented-cam-a",
+                    lat=11.0,
+                    lon=44.0,
+                )
+                add_media(
+                    catalog,
+                    "late",
+                    capture="2020-06-16T11:00:00Z",
+                    camera="invented-cam-b",
+                    lat=11.0,
+                    lon=44.0,
+                )
+                assign_days_places(catalog, settings)
+                clusters = place_clusters(catalog, settings)
+                self.assertEqual(len(clusters), 1)
+                self.assertEqual(
+                    clusters[0].first_time, "2020-06-16T11:00:00"
+                )
+                self.assertEqual(
+                    clusters[0].last_time, "2020-06-16T12:00:00"
+                )
+                self.assertEqual(
+                    clusters[0].asset_ids, ("test-late", "test-early")
+                )
+
+    def test_huge_integers_rejected_with_truncated_message(self):
+        huge_digits = "9" * 5001
+        old_limit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(0)
+        try:
+            huge = int(huge_digits)
+            with self.subTest("latitude"):
+                with self.assertRaises(DaysPlacesError) as raised:
+                    _validate_places(
+                        [
+                            {
+                                "name": "Invented Cove",
+                                "lat": huge,
+                                "lon": 0.0,
+                                "radius_m": 500,
+                            }
+                        ]
+                    )
+                message = str(raised.exception)
+                self.assertIn("place entry 0", message)
+                self.assertIn("lat", message)
+                self.assertNotIn(huge_digits, message)
+                self.assertLess(len(message), 500)
+            with self.subTest("radius"):
+                with self.assertRaises(DaysPlacesError) as raised:
+                    _validate_places(
+                        [
+                            {
+                                "name": "Invented Cove",
+                                "lat": 0.0,
+                                "lon": 0.0,
+                                "radius_m": huge,
+                            }
+                        ]
+                    )
+                message = str(raised.exception)
+                self.assertIn("place entry 0", message)
+                self.assertIn("radius_m", message)
+                self.assertNotIn(huge_digits, message)
+                self.assertLess(len(message), 500)
+            with self.subTest("cli latitude"):
+                with tempfile.TemporaryDirectory() as tmp:
+                    text = (
+                        trip_text()
+                        + '[[pipeline.places]]\nname = "Invented Cove"\n'
+                        + f"lat = {huge_digits}\nlon = 0\nradius_m = 500\n"
+                    )
+                    trip = write_trip(tmp, text)
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        code = main(["--trip", os.fspath(trip)])
+                    self.assertEqual(code, 1)
+                    self.assertNotIn("Traceback", err.getvalue())
+                    self.assertIn("lat", err.getvalue())
+            with self.subTest("cli radius"):
+                with tempfile.TemporaryDirectory() as tmp:
+                    text = (
+                        trip_text()
+                        + '[[pipeline.places]]\nname = "Invented Cove"\n'
+                        + f"lat = 0\nlon = 0\nradius_m = {huge_digits}\n"
+                    )
+                    trip = write_trip(tmp, text)
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        code = main(["--trip", os.fspath(trip)])
+                    self.assertEqual(code, 1)
+                    self.assertNotIn("Traceback", err.getvalue())
+                    self.assertIn("radius_m", err.getvalue())
+        finally:
+            sys.set_int_max_str_digits(old_limit)
 
     def test_unverified_time_gives_check_tag(self):
         with tempfile.TemporaryDirectory() as tmp:

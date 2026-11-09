@@ -130,6 +130,41 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(min(1.0, max(0.0, half))))
 
 
+def _short_number(value: object, limit: int = 80) -> str:
+    """Render a numeric setting without echoing thousands of digits.
+
+    Huge integers cannot use ``repr`` under the default string-conversion
+    limit; show a truncated prefix instead so error messages stay small.
+    """
+    try:
+        text = repr(value)
+    except ValueError:
+        get_limit = getattr(sys, "get_int_max_str_digits", None)
+        set_limit = getattr(sys, "set_int_max_str_digits", None)
+        if get_limit is None or set_limit is None:
+            return "<number too large to display>"
+        old = get_limit()
+        try:
+            set_limit(0)
+            try:
+                text = repr(value)
+            except Exception:
+                return "<number too large to display>"
+        finally:
+            try:
+                set_limit(old)
+            except Exception:
+                pass
+    if len(text) > limit:
+        return text[:limit] + f"...<truncated {len(text)} chars>"
+    return text
+
+
+#: Integers wider than this cannot fit in a float and are rejected before
+#: any float conversion. 2**1024 exceeds the float maximum.
+_MAX_INT_BITS = 1024
+
+
 def _validate_places(raw_places: object) -> list[_Place]:
     """Check every place entry, returning validated places in order.
 
@@ -167,14 +202,32 @@ def _validate_places(raw_places: object) -> list[_Place]:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise DaysPlacesError(
                     f"bad places {label}: key {key!r} must be a number, "
-                    f"got {value!r}"
+                    f"got {_short_number(value)}"
                 )
-            if not math.isfinite(value) or not low <= value <= high:
+            if isinstance(value, int) and value.bit_length() > _MAX_INT_BITS:
                 raise DaysPlacesError(
                     f"bad places {label}: key {key!r} must be between "
-                    f"{low} and {high}, got {value!r}"
+                    f"{low} and {high}, got {_short_number(value)}"
                 )
-            coords[key] = float(value)
+            try:
+                finite = math.isfinite(value)
+            except OverflowError:
+                raise DaysPlacesError(
+                    f"bad places {label}: key {key!r} must be between "
+                    f"{low} and {high}, got {_short_number(value)}"
+                ) from None
+            if not finite or not low <= value <= high:
+                raise DaysPlacesError(
+                    f"bad places {label}: key {key!r} must be between "
+                    f"{low} and {high}, got {_short_number(value)}"
+                )
+            try:
+                coords[key] = float(value)
+            except OverflowError:
+                raise DaysPlacesError(
+                    f"bad places {label}: key {key!r} must be between "
+                    f"{low} and {high}, got {_short_number(value)}"
+                ) from None
         if "radius_m" not in entry:
             raise DaysPlacesError(
                 f"bad places {label}: missing key 'radius_m'"
@@ -183,19 +236,38 @@ def _validate_places(raw_places: object) -> list[_Place]:
         if isinstance(radius, bool) or not isinstance(radius, (int, float)):
             raise DaysPlacesError(
                 f"bad places {label}: key 'radius_m' must be a number, "
-                f"got {radius!r}"
+                f"got {_short_number(radius)}"
             )
-        if not math.isfinite(radius) or radius <= 0:
+        if isinstance(radius, int) and radius.bit_length() > _MAX_INT_BITS:
             raise DaysPlacesError(
                 f"bad places {label}: key 'radius_m' must be above 0, "
-                f"got {radius!r}"
+                f"got {_short_number(radius)}"
             )
+        try:
+            radius_finite = math.isfinite(radius)
+        except OverflowError:
+            raise DaysPlacesError(
+                f"bad places {label}: key 'radius_m' must be above 0, "
+                f"got {_short_number(radius)}"
+            ) from None
+        if not radius_finite or radius <= 0:
+            raise DaysPlacesError(
+                f"bad places {label}: key 'radius_m' must be above 0, "
+                f"got {_short_number(radius)}"
+            )
+        try:
+            radius_value = float(radius)
+        except OverflowError:
+            raise DaysPlacesError(
+                f"bad places {label}: key 'radius_m' must be above 0, "
+                f"got {_short_number(radius)}"
+            ) from None
         validated.append(
             _Place(
                 name=name,
                 lat=coords["lat"],
                 lon=coords["lon"],
-                radius_m=float(radius),
+                radius_m=radius_value,
             )
         )
     return validated
@@ -336,14 +408,18 @@ def assign_days_places(catalog: Catalog, settings: object) -> DaysPlacesResult:
     return DaysPlacesResult(entries=tuple(entries))
 
 
-def place_clusters(catalog: Catalog) -> list[GpsCluster]:
+def place_clusters(catalog: Catalog, settings: object) -> list[GpsCluster]:
     """Group unmatched GPS points into unnamed clusters, one list per day.
 
     Only considered rows with a day, GPS and no place take part. Each
     row joins the first cluster of its day whose centre is within
-    :data:`CLUSTER_RADIUS_M`; otherwise it starts a new cluster.
+    :data:`CLUSTER_RADIUS_M`; otherwise it starts a new cluster. Rows
+    are sorted and reported by corrected local time (capture time plus
+    the camera's clock offset, converted to the trip time zone).
     """
-    by_day: dict[int, list[MediaRecord]] = {}
+    tz = _load_timezone(getattr(settings, "timezone"))
+    offsets = getattr(settings, "clock_offsets") or {}
+    by_day: dict[int, list[tuple[datetime, MediaRecord]]] = {}
     for row in catalog.list_media():
         if row.kind not in _CONSIDERED_KINDS:
             continue
@@ -353,20 +429,26 @@ def place_clusters(catalog: Catalog) -> list[GpsCluster]:
             continue
         if not row.capture_time:
             continue
-        by_day.setdefault(row.day, []).append(row)
+        if row.camera:
+            offset = offsets.get(row.camera, 0)
+        else:
+            offset = 0
+        local = _corrected_local(row.capture_time, offset, tz)
+        by_day.setdefault(row.day, []).append((local, row))
     clusters: list[GpsCluster] = []
     for day in sorted(by_day):
         ordered = sorted(
             by_day[day],
-            key=lambda row: (row.capture_time or "", row.id or 0),
+            key=lambda pair: (pair[0], pair[1].id or 0),
         )
-        members: list[list[MediaRecord]] = []
-        for row in ordered:
-            target: list[MediaRecord] | None = None
+        members: list[list[tuple[datetime, MediaRecord]]] = []
+        for pair in ordered:
+            _, row = pair
+            target: list[tuple[datetime, MediaRecord]] | None = None
             for group in members:
                 count = len(group)
-                centre_lat = sum(item.gps_lat or 0.0 for item in group) / count
-                centre_lon = sum(item.gps_lon or 0.0 for item in group) / count
+                centre_lat = sum(item.gps_lat or 0.0 for _, item in group) / count
+                centre_lon = sum(item.gps_lon or 0.0 for _, item in group) / count
                 if (
                     _haversine_m(
                         centre_lat,
@@ -379,15 +461,15 @@ def place_clusters(catalog: Catalog) -> list[GpsCluster]:
                     target = group
                     break
             if target is None:
-                members.append([row])
+                members.append([pair])
             else:
-                target.append(row)
+                target.append(pair)
         for group in members:
             count = len(group)
-            centre_lat = sum(item.gps_lat or 0.0 for item in group) / count
-            centre_lon = sum(item.gps_lon or 0.0 for item in group) / count
-            first = (group[0].capture_time or "")[:-1]
-            last = (group[-1].capture_time or "")[:-1]
+            centre_lat = sum(item.gps_lat or 0.0 for _, item in group) / count
+            centre_lon = sum(item.gps_lon or 0.0 for _, item in group) / count
+            first = group[0][0].strftime("%Y-%m-%dT%H:%M:%S")
+            last = group[-1][0].strftime("%Y-%m-%dT%H:%M:%S")
             clusters.append(
                 GpsCluster(
                     day=day,
@@ -397,7 +479,7 @@ def place_clusters(catalog: Catalog) -> list[GpsCluster]:
                     last_time=last,
                     clip_count=count,
                     asset_ids=tuple(
-                        item.asset_id or "" for item in group
+                        item.asset_id or "" for _, item in group
                     ),
                 )
             )
@@ -421,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         settings = load_trip(args.trip)
-    except TripSettingsError as exc:
+    except (TripSettingsError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:
@@ -437,7 +519,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         try:
             result = assign_days_places(catalog, settings)
-            clusters = place_clusters(catalog)
+            clusters = place_clusters(catalog, settings)
         except (DaysPlacesError, CatalogError, SafeWriteError, OSError) as exc:
             try:
                 catalog.finish_run(run_id, f"failed: {exc}")
