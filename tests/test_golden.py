@@ -147,6 +147,72 @@ class TestGolden(unittest.TestCase):
             self.assertIn(str(golden_path), message)
             self.assertIsInstance(ctx.exception.__cause__, UnicodeDecodeError)
 
+    def test_read_parse_failures_wrapped_as_assertion(self):
+        unknown_candidate = (
+            b'<?xml version="1.0" encoding="x-unknown-codec"?>'
+            b'<fcpxml version="1.14"/>'
+        )
+        unknown_golden_text = (
+            '<?xml version="1.0" encoding="x-unknown-codec"?>'
+            '<fcpxml version="1.14"/>'
+        )
+        cases = [
+            ("candidate_invalid_utf8", b"\xff", "valid_golden", ET.ParseError),
+            ("candidate_unknown_encoding", unknown_candidate,
+             "valid_golden", LookupError),
+            ("candidate_malformed", b"<fcpxml><unclosed>",
+             "valid_golden", ET.ParseError),
+            ("golden_invalid_utf8", None, "golden_bytes_ff",
+             UnicodeDecodeError),
+            ("golden_unknown_encoding", None, "golden_text_unknown",
+             LookupError),
+            ("golden_malformed", None, "golden_text_malformed",
+             ET.ParseError),
+            ("missing_golden", None, "missing", FileNotFoundError),
+            ("golden_path_is_directory", None, "is_directory", OSError),
+        ]
+        for label, candidate, setup, expected_cause in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    golden_dir = Path(tmp) / "goldens"
+                    golden_path = golden_dir / "clip.fcpxml"
+                    if setup == "valid_golden":
+                        with mock.patch.dict(os.environ, {"GOLDEN_UPDATE": "1"}):
+                            assert_golden(ORDER_A, "clip", golden_dir=golden_dir)
+                    elif setup == "golden_bytes_ff":
+                        golden_dir.mkdir(parents=True)
+                        golden_path.write_bytes(b"\xff")
+                        candidate = ORDER_A
+                    elif setup == "golden_text_unknown":
+                        golden_dir.mkdir(parents=True)
+                        golden_path.write_text(
+                            unknown_golden_text, encoding="utf-8")
+                        candidate = ORDER_A
+                    elif setup == "golden_text_malformed":
+                        golden_dir.mkdir(parents=True)
+                        golden_path.write_text(
+                            "<fcpxml><unclosed>", encoding="utf-8")
+                        candidate = ORDER_A
+                    elif setup == "missing":
+                        candidate = ORDER_A
+                    elif setup == "is_directory":
+                        golden_dir.mkdir(parents=True)
+                        golden_path.mkdir()
+                        candidate = ORDER_A
+                    else:
+                        self.fail("unknown setup %r" % (setup,))
+                    with without_golden_update():
+                        with self.assertRaises(AssertionError) as ctx:
+                            assert_golden(candidate, "clip",
+                                          golden_dir=golden_dir)
+                    message = str(ctx.exception)
+                    self.assertIn(str(golden_path), message)
+                    cause = ctx.exception.__cause__
+                    self.assertIsNotNone(cause)
+                    self.assertIsInstance(cause, expected_cause)
+                    self.assertIsInstance(cause, Exception)
+                    self.assertNotIsInstance(cause, AssertionError)
+
     def test_dtd_skips_when_missing(self):
         missing = "/nonexistent/FCPXMLv1_14.dtd"
         with mock.patch.dict(os.environ, {"FCP_DTD": missing}):

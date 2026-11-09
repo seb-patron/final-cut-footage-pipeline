@@ -258,25 +258,18 @@ def assert_golden(xml_bytes, name, *, golden_dir=None):
     else:
         directory = Path(golden_dir)
     golden_path = directory / ("%s.fcpxml" % name)
-    try:
-        canonical = canonicalize(xml_bytes)
-    except (OSError, UnicodeDecodeError, ET.ParseError) as exc:
-        raise AssertionError(
-            "unparseable candidate for golden %s: %s" % (golden_path, exc)
-        ) from exc
-    if os.environ.get("GOLDEN_UPDATE") == "1":
-        directory.mkdir(parents=True, exist_ok=True)
-        golden_path.write_text(canonical, encoding="utf-8")
-        return None
-    if not golden_path.is_file():
-        raise AssertionError(
-            "missing golden file %s; rerun with GOLDEN_UPDATE=1 to create it" % golden_path
-        )
-    # One handler for the whole golden read/decode/parse step, so no
-    # variant (OSError, undecodable bytes, malformed XML) escapes raw.
-    # diff holds whatever comparison was available before the failure.
+    # One broad handler for the whole read-decode-parse step for both the
+    # candidate and the golden, so no variant (OSError, undecodable bytes,
+    # malformed XML, unknown encoding) escapes raw. Catches Exception, not
+    # BaseException, and chains the original error. diff holds whatever
+    # comparison was available before the failure.
     diff = ""
     try:
+        canonical = canonicalize(xml_bytes)
+        if os.environ.get("GOLDEN_UPDATE") == "1":
+            directory.mkdir(parents=True, exist_ok=True)
+            golden_path.write_text(canonical, encoding="utf-8")
+            return None
         expected = golden_path.read_text(encoding="utf-8")
         if canonical == expected:
             return None
@@ -287,13 +280,14 @@ def assert_golden(xml_bytes, name, *, golden_dir=None):
             tofile="actual",
         ))
         tag, path = _first_difference(xml_bytes, expected)
-    except (OSError, UnicodeDecodeError, ET.ParseError) as exc:
-        if isinstance(exc, ET.ParseError):
-            raise AssertionError(
-                "malformed golden file %s: %s\n%s" % (golden_path, exc, diff)
-            ) from exc
+    except Exception as exc:
+        if isinstance(exc, AssertionError):
+            raise
+        hint = ""
+        if isinstance(exc, FileNotFoundError):
+            hint = "; rerun with GOLDEN_UPDATE=1 to create it"
         raise AssertionError(
-            "unreadable golden file %s: %s\n%s" % (golden_path, exc, diff)
+            "golden check failed for %s%s: %s\n%s" % (golden_path, hint, exc, diff)
         ) from exc
     raise AssertionError(
         "golden mismatch for %s: first difference at <%s> (path %s)\n%s"
