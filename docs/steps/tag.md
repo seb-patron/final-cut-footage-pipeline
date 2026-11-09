@@ -101,8 +101,118 @@ such as `built 3, skipped 1, stale 0, failed 0`.
 - `2`: the command was used wrongly (the `--trip` folder is required).
 - `1`: the trip or catalog could not be read.
 
-## Nothing leaves the Mac
+## Building sheets: nothing leaves the Mac
 
 Building sheets uses no network and never opens, scripts, or launches
 any editing program. It reads footage, writes only into `.pipeline/`,
 and sends nothing anywhere.
+
+## Tagging a clip from its sheet
+
+Once a clip has a contact sheet, a second step reads that picture and
+asks an AI service to describe the clip. This is the first step in the
+pipeline that sends anything anywhere; everything before it runs fully
+on your machine. Nothing calls this step yet; running it by hand looks
+like this:
+
+```
+python3 -m fcp_pipeline.tag --trip <folder>
+```
+
+What the step does, per clip: it sends the clip's one contact-sheet
+picture together with a short text (one line of facts about the clip,
+its slate text, the first 300 words of its transcript, and the list of
+allowed tags), reads back a structured answer, checks that answer, and
+stores it in the catalog as tags. A clip whose file changed since the
+scan is reported as stale; a clip with no sheet for its current state
+is reported with no sheet; both are left alone until the earlier steps
+run again.
+
+Exactly what is sent: one contact-sheet picture, one line of facts
+(camera, duration, day, place and capture time, leaving out whatever is
+unknown), the clip's slate text, the first 300 words of its transcript,
+and the list of allowed tags. What never is: footage, video,
+full-resolution frames, file names and paths. Only the sheet image is
+ever uploaded.
+
+The provider and model come from `[pipeline.ai.tag]` in `project.toml`,
+else the shared `[pipeline.ai]` values, OpenAI by default with Claude
+selectable per step. No model id is built in: you copy a current id
+from your provider's model list into the setting, for example:
+
+| Step  | Provider | Model        |
+|-------|----------|--------------|
+| tag   | OpenAI   | (your model) |
+| tag   | Claude   | (your model) |
+
+The provider packages are optional and not bundled:
+
+```sh
+pip install openai anthropic
+```
+
+Keys come only from the environment or the macOS Keychain, as
+described in [docs/ai-providers.md](../ai-providers.md).
+
+The answer has five fields: a one-or-two-sentence description, the
+framing (`wide`, `medium`, `close-up`, `detail`, `establishing`,
+`aerial`, `pov`, `static` or `other`), time ranges with tags and a
+confidence each, visible problems, and an optional hint for matching
+the clip to the outline later.
+
+What is stored where, all with source `ai` (the lowest precedence,
+below slate, callout, metadata and editor tags): the framing as a
+whole-clip `shot` tag, the description as the clip note, the problems
+as a whole-clip to-do tag, the outline hint as a `check` tag for the
+later outline step, and each range tag with its start and duration.
+The `? ` prefix itself is never stored: a `check` status is what the
+export step later renders as the `? ` keyword.
+
+The cutoff is 0.75: a range at or above it is stored plain, below it
+as a check tag that Final Cut will later show as `? <tag>`. The
+`--cutoff` flag moves that line, for example `--cutoff 0.9`.
+
+Every range is checked before anything is stored: ranges with a
+confidence outside 0 to 1 are dropped, ranges outside the clip are
+dropped, tags outside the trip vocabulary are dropped, and times are
+snapped outwards to the nearest tile edges so a stored range always
+covers what the model named. A worked example: on a 60-second clip the
+model names 3.0 to 9.0 seconds, but the nearest tile times are 0 and
+10 seconds, so the range is stored as 0 to 10 seconds.
+
+The vocabulary is the trip's own words: place names from
+`project.toml`, camera names from the catalog, existing catalog tags,
+and an optional `--vocabulary` JSON file mapping extra folders to
+values, for example:
+
+```json
+{"subject": ["harbor-seal", "fishing-boat"]}
+```
+
+A malformed answer is retried once, then the clip is listed as failed,
+never silently skipped. Locked, deleted and higher-source tags are
+never changed: an existing tag in the same slot keeps a human decision
+safe. A rerun skips clips that already hold `ai` tags; `--retag` tags
+them again. `--dry-run` reports what would be tagged without calling
+or writing anything.
+
+The command and its exit codes:
+
+```
+python3 -m fcp_pipeline.tag --trip <folder> [--cutoff N] [--retag] [--dry-run] [--vocabulary FILE] [--offline]
+```
+
+- `0`: the run completed (failed, stale and no-sheet clips do not fail it).
+- `1`: the trip, catalog or vocabulary file could not be read.
+- `2`: the command was used wrongly, or the model setting is missing.
+- `3`: the switch is offline.
+
+Offline mode refuses before anything is sent: with `offline = true`
+in `[pipeline]` or `--offline` on the command, every call is refused
+with one line on stderr and nothing leaves the process. Every call
+that gets an answer appends one row to `.pipeline/ai-usage.tsv` with
+the step, provider, model and token counts, never words or pixels; see
+[docs/privacy.md](../privacy.md).
+
+Batch mode, the side-by-side provider test and the pipeline command's
+`tag` subcommand come later.

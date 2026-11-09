@@ -6,10 +6,13 @@ it, what gets written down, and where the passwords live.
 
 ## What may be sent, and when
 
-No step sends anything yet. The prototype commands (`footage_keywords.py`,
-`sample_vision.py`) run fully on your machine: local transcript files,
-local FFmpeg sampling, and local Apple Vision labels. Nothing leaves the
-computer.
+The tag step is the first step that sends anything: one contact-sheet
+picture and a short text (one line of facts, slate text, the first 300
+words of the transcript and the list of allowed tags) through the gate,
+as described in [docs/steps/tag.md](steps/tag.md). The prototype
+commands (`footage_keywords.py`, `sample_vision.py`) still send
+nothing: local transcript files, local FFmpeg sampling, and local Apple
+Vision labels. Nothing else leaves the computer.
 
 Later steps may ask an AI service (OpenAI by default, Claude selectable
 per step) to read a frame or a transcript excerpt. When that happens, the
