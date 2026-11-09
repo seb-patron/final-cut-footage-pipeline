@@ -22,10 +22,16 @@ __all__ = [
     "AudioFormatError",
     "AudioSegment",
     "AudioTranscript",
+    "AudioWord",
     "build_request",
     "parse_transcription",
     "transcribe_audio",
 ]
+
+#: Times larger than this, in seconds, are refused with AudioFormatError.
+#: The bound is checked on the raw answer value, before any float
+#: conversion or multiplication, so huge ints never reach float().
+MAX_SECONDS = 1_000_000
 
 
 class AudioFormatError(ValueError):
@@ -45,23 +51,35 @@ class AudioSegment:
 
 
 @dataclass(frozen=True)
+class AudioWord:
+    """One transcribed word with its exact time range."""
+
+    start: Fraction
+    end: Fraction
+    word: str
+
+
+@dataclass(frozen=True)
 class AudioTranscript:
-    """One hosted answer: its language and its segments in order."""
+    """One hosted answer: its language, segments and words in order."""
 
     language: str | None
     segments: tuple[AudioSegment, ...]
+    words: tuple[AudioWord, ...] = ()
 
 
-def build_request(model: str) -> dict:
+def build_request(model: str, *, words: bool = False) -> dict:
     """Return the hosted transcription request body for ``model``.
 
     The answer must carry per-segment times, so the request pins the
-    verbose JSON shape with segment-level times.
+    verbose JSON shape with segment-level times. With ``words`` true it
+    also asks for word-level times.
     """
+    granularities = ["segment", "word"] if words else ["segment"]
     return {
         "model": model,
         "response_format": "verbose_json",
-        "timestamp_granularities": ["segment"],
+        "timestamp_granularities": granularities,
     }
 
 
@@ -93,20 +111,53 @@ def _segment_dict(raw: object, index: int) -> dict:
     )
 
 
-def _to_fraction(value: object, index: int, key: str) -> Fraction:
-    """Turn a JSON number of seconds into an exact millisecond Fraction."""
+def _checked_fraction(value: object, label: str) -> Fraction:
+    """Turn a JSON number of seconds into an exact millisecond Fraction.
+
+    ``label`` names the key in refusal messages. A value whose absolute
+    value exceeds :data:`MAX_SECONDS` is refused like a non-finite one;
+    the bound is checked on the absolute raw value, before any float
+    conversion or ``math.isfinite`` call, so a huge int never reaches
+    ``float()``. Negative times are refused by the caller's
+    ``0 <= start <= end`` rule.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise AudioFormatError(
-            f"segments[{index}].{key}: must be a finite number of seconds"
+            f"{label}: must be a finite number of seconds"
+        )
+    if abs(value) > MAX_SECONDS:
+        raise AudioFormatError(
+            f"{label}: must be a finite number of seconds"
         )
     if not math.isfinite(value):
         raise AudioFormatError(
-            f"segments[{index}].{key}: must be a finite number of seconds"
+            f"{label}: must be a finite number of seconds"
         )
     return Fraction(round(float(value) * 1000), 1000)
 
 
-def parse_transcription(raw: object) -> AudioTranscript:
+def _to_fraction(value: object, index: int, key: str) -> Fraction:
+    """Turn a JSON number of seconds into an exact millisecond Fraction."""
+    return _checked_fraction(value, f"segments[{index}].{key}")
+
+
+def _word_dict(raw: object, index: int) -> dict:
+    """Return one raw word as a plain dict, through ``model_dump()``."""
+    if isinstance(raw, dict):
+        return raw
+    dump = getattr(raw, "model_dump", None)
+    if callable(dump):
+        data = dump()
+        if isinstance(data, dict):
+            return data
+    raise AudioFormatError(
+        f"words[{index}]: must be an object with start, end and word"
+    )
+
+
+def parse_transcription(
+    raw: object, *, require_words: bool = False
+) -> AudioTranscript:
     """Parse a hosted verbose transcription answer.
 
     Accepts a plain dict or an object with ``model_dump()``. The answer
@@ -118,7 +169,13 @@ def parse_transcription(raw: object) -> AudioTranscript:
     :class:`Fraction` values at millisecond resolution. Anything else,
     including a missing or empty ``"segments"`` key (the chosen model
     returned no segment times), raises :class:`AudioFormatError` naming
-    the key and the rule, never the text.
+    the key and the rule, never the text. With ``require_words`` true
+    the answer's top-level ``"words"`` must be a non-empty list of
+    objects with a non-empty string ``"word"`` (kept stripped) and
+    finite numeric ``"start"`` and ``"end"`` with
+    ``0 <= start <= end``; a missing, empty or broken list raises
+    :class:`AudioFormatError`. Without it the ``"words"`` key is
+    ignored.
     """
     answer = _answer_dict(raw)
     segments_raw = answer.get("segments")
@@ -146,10 +203,39 @@ def parse_transcription(raw: object) -> AudioTranscript:
     language = answer.get("language")
     if not isinstance(language, str):
         language = None
-    return AudioTranscript(language=language, segments=tuple(segments))
+    words: list[AudioWord] = []
+    if require_words:
+        words_raw = answer.get("words")
+        if not isinstance(words_raw, list) or not words_raw:
+            raise AudioFormatError(
+                "words: must be a non-empty list of words"
+            )
+        for index, item in enumerate(words_raw):
+            piece = _word_dict(item, index)
+            start = _checked_fraction(
+                piece.get("start"), f"words[{index}].start"
+            )
+            end = _checked_fraction(piece.get("end"), f"words[{index}].end")
+            if not (Fraction(0, 1) <= start <= end):
+                raise AudioFormatError(
+                    f"words[{index}]: times must satisfy 0 <= start <= end"
+                )
+            text = piece.get("word")
+            if not isinstance(text, str) or not text.strip():
+                raise AudioFormatError(
+                    f"words[{index}].word: must be a non-empty string"
+                )
+            words.append(
+                AudioWord(start=start, end=end, word=text.strip())
+            )
+    return AudioTranscript(
+        language=language, segments=tuple(segments), words=tuple(words)
+    )
 
 
-def transcribe_audio(gate, model: str, audio_path, *, client=None) -> AudioTranscript:
+def transcribe_audio(
+    gate, model: str, audio_path, *, client=None, words: bool = False
+) -> AudioTranscript:
     """Upload one audio file and return its parsed hosted transcript.
 
     Reads the file size, then runs ``gate.call("openai", model,
@@ -160,7 +246,8 @@ def transcribe_audio(gate, model: str, audio_path, *, client=None) -> AudioTrans
     binary mode, and calls
     ``client.audio.transcriptions.create(file=handle, **build_request(model))``;
     a result with ``model_dump()`` is converted to a dict first. The
-    answer then goes through :func:`parse_transcription`.
+    answer then goes through :func:`parse_transcription`. With ``words``
+    true the request asks for word times and the answer must carry them.
     """
     size = os.path.getsize(os.fspath(audio_path))
     target = os.fspath(audio_path)
@@ -171,7 +258,7 @@ def transcribe_audio(gate, model: str, audio_path, *, client=None) -> AudioTrans
         backend = client if client is not None else gate.openai_client()
         with open(target, "rb") as handle:
             raw = backend.audio.transcriptions.create(
-                file=handle, **build_request(model)
+                file=handle, **build_request(model, words=words)
             )
         dump = getattr(raw, "model_dump", None)
         if callable(dump):
@@ -179,4 +266,4 @@ def transcribe_audio(gate, model: str, audio_path, *, client=None) -> AudioTrans
         return raw
 
     answer = gate.call("openai", model, [("audio", size)], do_request)
-    return parse_transcription(answer)
+    return parse_transcription(answer, require_words=words)
