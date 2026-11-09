@@ -6,7 +6,7 @@ contract: ``title`` at the top level (``status``, ``created``, ``dates`` and
 ``youtube`` are accepted but unused); ``[final_cut]`` with ``library`` and
 ``events`` and ``[media]`` with ``footage``, ``photos`` and ``assets``,
 recorded as given; and the pipeline-owned ``[pipeline]`` table holding
-``timezone``, ``start_date``, ``clock_offsets`` and ``places``. Each other
+``timezone``, ``start_date``, ``clock_offsets``, ``places`` and ``offline``. Each other
 top-level key or table, and each unknown key inside ``[pipeline]``, produces
 exactly one :class:`UserWarning` and loading still succeeds. Layout paths are
 recorded without creating or checking them.
@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 #: Pipeline-owned keys: they belong under ``[pipeline]``, never at top level.
-TOP_LEVEL_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places")
+TOP_LEVEL_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline")
 #: Accepted top-level keys and tables; anything else warns exactly once.
 KNOWN_TOP_LEVEL_KEYS = (
     "title",
@@ -33,7 +33,7 @@ KNOWN_TOP_LEVEL_KEYS = (
     "pipeline",
 )
 #: Keys the pipeline owns inside ``[pipeline]``; anything else warns exactly once.
-KNOWN_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places")
+KNOWN_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline")
 
 _CLOCK_OFFSET_RE = re.compile(r"([+-]?)([0-9]+):([0-5][0-9]):([0-5][0-9])")
 
@@ -52,6 +52,7 @@ class TripSettings:
     start_date: datetime.date
     clock_offsets: dict[str, int] = field(default_factory=dict)
     places: list = field(default_factory=list)
+    offline: bool = False
     library: str = ""
     events: list = field(default_factory=list)
     footage: list = field(default_factory=list)
@@ -145,6 +146,12 @@ def load_trip(folder: str | Path) -> TripSettings:
     if not isinstance(places, list):
         raise TripSettingsError("project.toml key '[pipeline].places' must be an array")
 
+    offline = pipeline.get("offline", False)
+    if not isinstance(offline, bool):
+        raise TripSettingsError(
+            "project.toml key '[pipeline].offline' must be a boolean"
+        )
+
     final_cut = data.get("final_cut", {})
     if not isinstance(final_cut, dict):
         raise TripSettingsError("project.toml table '[final_cut]' must be a table")
@@ -184,6 +191,7 @@ def load_trip(folder: str | Path) -> TripSettings:
         start_date=start_date,
         clock_offsets=clock_offsets,
         places=places,
+        offline=offline,
         library=library,
         events=events,
         footage=footage,
