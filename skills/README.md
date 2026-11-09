@@ -62,7 +62,7 @@ This command checks every skill and dry-runs its commands on a fresh
 synthetic trip, offline, writing nothing:
 
 ```
-python3 -m tests.skill_harness skills
+PYTHONDONTWRITEBYTECODE=1 python3 -m tests.skill_harness skills
 ```
 
 It prints one line per skill and exits nonzero when any skill fails.

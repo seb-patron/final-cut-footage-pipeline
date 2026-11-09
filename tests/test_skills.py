@@ -243,6 +243,88 @@ class TestSkills(unittest.TestCase):
                                   "The fixed path /dev/null is kept.\n"))
             self.assertEqual(check_skill(path), [])
 
+    def test_command_block_markers_flagged(self):
+        def command_text(name, command):
+            return ("---\n"
+                    "name: %s\n"
+                    "description: \"A temporary probe skill.\"\n"
+                    "---\n"
+                    "\n"
+                    "```sh\n"
+                    "%s\n"
+                    "```\n" % (name, command))
+
+        cases = [
+            ("argument placeholder",
+             "probe-command-args",
+             "python3 -m fcp_pipeline scan --trip $ARGUMENTS",
+             "$ARGUMENTS"),
+            ("numbered placeholder",
+             "probe-command-dollar1",
+             "python3 -m fcp_pipeline scan --trip $1",
+             "$1"),
+            ("claude variable",
+             "probe-command-claude",
+             "python3 -m fcp_pipeline scan --trip $CLAUDE_HOME",
+             "$CLAUDE_"),
+            ("codex variable",
+             "probe-command-codex",
+             "python3 -m fcp_pipeline scan --trip $CODEX_HOME",
+             "$CODEX_"),
+            ("shell-injection prefix",
+             "probe-command-inject",
+             "python3 -m fcp_pipeline scan --trip <trip> !`date`",
+             "!`"),
+            ("slash command in backticks",
+             "probe-command-slash",
+             "python3 -m fcp_pipeline scan --trip <trip> `/compact`",
+             "/compact"),
+        ]
+        for label, folder, command, marker in cases:
+            with self.subTest(label=label):
+                path = self._write_skill(
+                    self.base / "skills", folder,
+                    command_text(folder, command))
+                findings = check_skill(path)
+                self.assertTrue(findings, label)
+                self.assertIn(marker, "\n".join(findings))
+        with self.subTest(label="clean valid command"):
+            path = self._write_skill(
+                self.base / "skills", "probe-command-clean",
+                command_text("probe-command-clean",
+                             "python3 -m fcp_pipeline scan "
+                             "--trip <trip> --dry-run"))
+            self.assertEqual(check_skill(path), [])
+
+    def test_documented_invocation_writes_no_bytecode(self):
+        documented = (REPO_ROOT / "skills" / "README.md").read_text(
+            encoding="utf-8")
+        guard = "PYTHONDONTWRITEBYTECODE=1" in documented
+        tree = self.base / "bytecode-tree"
+        tree.mkdir()
+        ignore = shutil.ignore_patterns("__pycache__")
+        for leaf in ("fcp_pipeline", "tests", "skills"):
+            shutil.copytree(REPO_ROOT / leaf, tree / leaf, ignore=ignore)
+        shutil.copyfile(AGENTS_MD, tree / "AGENTS.md")
+        shutil.copytree(SAMPLE_DIR, tree / "skills" / "sample-dry-run")
+        before = self._snapshot_tree(tree)
+        self.assertFalse([rel for rel in before if "__pycache__" in rel])
+        # Start the documented invocation without inheriting the guard
+        # (or a redirecting PYTHONPYCACHEPREFIX) from this process, so
+        # any bytecode freedom comes from the invocation itself.
+        env = dict(os.environ)
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        env.pop("PYTHONPYCACHEPREFIX", None)
+        if guard:
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+        completed = subprocess.run(
+            [sys.executable, "-m", "tests.skill_harness", "skills"],
+            cwd=tree, env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=300)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("ok sample-dry-run", completed.stdout)
+        self.assertEqual(self._snapshot_tree(tree), before)
+
     # Known commands.
 
     def test_named_commands_exist(self):

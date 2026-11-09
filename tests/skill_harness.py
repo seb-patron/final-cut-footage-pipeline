@@ -229,8 +229,11 @@ def check_skill(path):
                 findings.append(
                     "%s:%d: tool-only command %r: a shared skill runs only "
                     "'python3 -m fcp_pipeline ...' lines" % (path, lineno, stripped))
-            continue
-        if in_command:
+                continue
+            # A valid pipeline command line can still carry tool-only
+            # markers, so fall through to the checks below instead of
+            # skipping them.
+        elif in_command:
             continue
         start = _SLASH_START_RE.match(raw)
         if start is not None:
@@ -272,6 +275,7 @@ def check_commands(skill):
     findings = []
     parser = build_parser()
     env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONPATH"] = str(_repository_root())
     for args in skill.commands:
         shown = "python3 -m fcp_pipeline %s" % " ".join(args)
