@@ -272,6 +272,41 @@ class SafeWriter:
             )
         self._check_target(resolved, lock, 0)
 
+    @staticmethod
+    def _check_lock_fd(fd: int, lock: Path) -> None:
+        """Refuse a lock descriptor that is not a regular file.
+
+        The descriptor was opened with ``O_NOFOLLOW | O_NONBLOCK`` (plus
+        ``O_CLOEXEC``), so a FIFO never blocks the open; ``fstat`` here
+        refuses it (and any other non-regular file) with
+        :class:`SafeWriteError`. ``O_NONBLOCK`` is cleared before
+        returning (locking is mandatory, so ``fcntl`` is always
+        available here) so later behaviour is blocking as usual. The
+        descriptor is left open; the caller closes it (and, when this
+        call created it, removes it) on every path out.
+        """
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            raise SafeWriteError(
+                f"refused numbered output in edit/: could not lock {lock} "
+                f"({exc}); nothing was written"
+            ) from exc
+        if not stat.S_ISREG(st.st_mode):
+            raise SafeWriteError(
+                f"refused numbered output in edit/: could not lock {lock} "
+                "(the lock file is not a regular file); nothing was written"
+            )
+        if fcntl is not None:
+            try:
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+            except OSError as exc:
+                raise SafeWriteError(
+                    f"refused numbered output in edit/: could not lock {lock} "
+                    f"({exc}); nothing was written"
+                ) from exc
+
     def _take_number_lock(self):
         """Exclusive flock on the ``.pipeline/`` lock file (mandatory).
 
@@ -281,12 +316,18 @@ class SafeWriter:
         project-root directory descriptor with ``O_NOFOLLOW``, the opened
         folder is re-verified (``fstat`` against a fresh ``fstatat`` of the
         root's ``.pipeline/``) to still be the project's own ``.pipeline/``,
-        and only then is the lock file opened from that folder descriptor
-        with ``O_NOFOLLOW`` (retried a bounded number of times when a
-        racing creator makes one attempt report a spurious ``ENOENT``).
-        A shortcut swapped into the path after the checks is therefore
-        refused instead of followed, and nothing is created outside
-        ``.pipeline/``. Raises :class:`SafeWriteError`
+        and only then is the lock file claimed from that folder descriptor
+        with ``O_CREAT | O_EXCL`` (retried a bounded number of times when
+        a racing creator makes one attempt report a spurious ``ENOENT``).
+        Only an ``O_EXCL`` open that succeeds marks this call as the
+        creator; a lock file that already exists is opened without
+        ``O_CREAT`` and is never removed by this call. Every lock open
+        uses ``O_NOFOLLOW | O_NONBLOCK`` and the descriptor is refused
+        unless ``fstat`` shows a regular file, so a FIFO (or any other
+        non-regular file) at the lock path is refused promptly instead
+        of blocking. A shortcut swapped into the path after the checks
+        is therefore refused instead of followed, and nothing is created
+        outside ``.pipeline/``. Raises :class:`SafeWriteError`
         without handing out a number when the lock path is unsafe or the
         lock cannot be taken: numbering never proceeds without the lock.
         A failed attempt removes only the lock file that attempt just
@@ -329,19 +370,45 @@ class SafeWriter:
                     ".pipeline/ changed while taking the number lock; "
                     "nothing was written"
                 )
+            cloexec = getattr(os, "O_CLOEXEC", 0)
             for _ in range(_LOCK_OPEN_ATTEMPTS):
-                try:
-                    os.stat(_LOCK_FILENAME, dir_fd=pipe_fd, follow_symlinks=False)
-                    created = False
-                except FileNotFoundError:
-                    created = True
+                # Claim the lock atomically: only an O_CREAT|O_EXCL open
+                # that succeeds marks this call as the creator. A lock
+                # file that already exists (including one a racing
+                # caller created) is opened without O_CREAT, so this
+                # call never owns it and never removes it.
                 try:
                     fd = os.open(
                         _LOCK_FILENAME,
-                        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | os.O_NOFOLLOW
+                        | os.O_NONBLOCK
+                        | cloexec,
                         0o666,
                         dir_fd=pipe_fd,
                     )
+                except FileExistsError:
+                    fd = None
+                    try:
+                        fd = os.open(
+                            _LOCK_FILENAME,
+                            os.O_WRONLY
+                            | os.O_NOFOLLOW
+                            | os.O_NONBLOCK
+                            | cloexec,
+                            dir_fd=pipe_fd,
+                        )
+                    except FileNotFoundError:
+                        # Vanished between attempts; retry with the same
+                        # dir_fd. Anything else (ELOOP on a shortcut,
+                        # EACCES, ...) fails at once via the handler below.
+                        fd = None
+                        continue
+                    self._check_lock_fd(fd, lock)
+                    created = False
+                    break
                 except FileNotFoundError:
                     # A racing creator can make this very open report
                     # ENOENT for the absent leaf it should have created;
@@ -350,6 +417,8 @@ class SafeWriter:
                     # (ELOOP on a shortcut, EACCES, ...) fails at once.
                     fd = None
                     continue
+                created = True
+                self._check_lock_fd(fd, lock)
                 break
             if fd is None:
                 raise SafeWriteError(

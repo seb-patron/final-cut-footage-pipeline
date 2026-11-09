@@ -2,6 +2,8 @@
 
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -471,6 +473,96 @@ class TestSafeWrite(unittest.TestCase):
                                 project / ".pipeline" / "safe-write.lock"
                             )
                         )
+
+    def test_numbered_racing_creator_lock_is_never_unlinked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            places = self.make_trip(Path(tmp))
+            writer = places["writer"]
+            project = places["project"]
+            pipeline = project / ".pipeline"
+            pipeline.mkdir(parents=True, exist_ok=True)
+            real_open = os.open
+            raced = {"done": False}
+
+            def racing_open(path, flags, *args, **kwargs):
+                dir_fd = kwargs.get("dir_fd")
+                if (
+                    isinstance(path, str)
+                    and path == "safe-write.lock"
+                    and dir_fd is not None
+                    and not raced["done"]
+                ):
+                    raced["done"] = True
+                    try:
+                        rival = real_open(
+                            path,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                            0o666,
+                            dir_fd=dir_fd,
+                        )
+                    except FileExistsError:
+                        pass
+                    else:
+                        try:
+                            os.write(rival, b"rival-lock")
+                        finally:
+                            os.close(rival)
+                return real_open(path, flags, *args, **kwargs)
+
+            with (
+                mock.patch("os.open", side_effect=racing_open),
+                mock.patch(
+                    "fcp_pipeline.safe_write.fcntl.flock",
+                    side_effect=OSError("lock boom"),
+                ),
+            ):
+                with self.assertRaises(SafeWriteError):
+                    writer.write_numbered("cut.fcpxml", b"data")
+            self.assertTrue(raced["done"])
+            lock = pipeline / "safe-write.lock"
+            self.assertEqual(lock.read_bytes(), b"rival-lock")
+            edit = project / "edit"
+            self.assertEqual(list(edit.iterdir()) if edit.exists() else [], [])
+            final = writer.write_numbered("cut.fcpxml", b"data")
+            self.assertEqual(final.name, "001-cut.fcpxml")
+            self.assertEqual(final.read_bytes(), b"data")
+            self.assertEqual(lock.read_bytes(), b"rival-lock")
+
+    def test_numbered_fifo_lock_is_refused_promptly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            places = self.make_trip(Path(tmp))
+            project = places["project"]
+            pipeline = project / ".pipeline"
+            pipeline.mkdir(parents=True, exist_ok=True)
+            lock = pipeline / "safe-write.lock"
+            os.mkfifo(lock)
+            code = "\n".join(
+                [
+                    "import sys",
+                    "from pathlib import Path",
+                    "from fcp_pipeline.trip import load_trip",
+                    "from fcp_pipeline.safe_write import SafeWriter, SafeWriteError",
+                    f"settings = load_trip(Path({str(project)!r}))",
+                    "writer = SafeWriter(settings)",
+                    "try:",
+                    "    writer.write_numbered('cut.fcpxml', b'data')",
+                    "except SafeWriteError:",
+                    "    sys.exit(10)",
+                    "except Exception:",
+                    "    sys.exit(20)",
+                    "sys.exit(30)",
+                ]
+            )
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                timeout=5,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 10, proc.stderr)
+            self.assertTrue(stat.S_ISFIFO(os.lstat(lock).st_mode))
+            edit = project / "edit"
+            self.assertEqual(list(edit.iterdir()) if edit.exists() else [], [])
 
     def test_numbered_names_and_limits(self):
         with tempfile.TemporaryDirectory() as tmp:

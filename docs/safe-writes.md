@@ -55,7 +55,7 @@ nothing is created anywhere else. When the lock cannot be taken, or
 exclusive locking is unavailable at all, the numbered write is refused
 with an error and nothing is written: numbering never proceeds without
 the lock. A failed lock attempt removes only the lock file that attempt
-just created; a lock file that was already there is never removed.
+just created; a lock file that was already there is never removed. The lock is claimed atomically with `O_CREAT|O_EXCL`, so only the call whose exclusive open succeeded counts as the creator and a racing caller's lock is never removed. The lock is opened with `O_NONBLOCK` and refused unless it is a regular file, so a FIFO at the lock path fails promptly with an error instead of blocking forever.
 
 ## Threat model
 
