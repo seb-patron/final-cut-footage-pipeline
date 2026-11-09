@@ -20,6 +20,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install media tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libimage-exiftool-perl
+      - name: Install media tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg exiftool
       - name: Compile Python
         run: python -m py_compile footage_keywords.py sample_vision.py
       - name: Run synthetic regression tests
