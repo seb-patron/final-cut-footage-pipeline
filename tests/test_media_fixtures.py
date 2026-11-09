@@ -110,6 +110,20 @@ class TestMedia(unittest.TestCase):
                     want_duration)
                 clip = make_clip(seconds=seconds, rate=rate)
                 probed = _probe(clip)
+                video_streams = [stream for stream in probed["streams"]
+                                 if stream.get("codec_type") == "video"]
+                self.assertEqual(len(video_streams), 1,
+                                 "expected exactly one video stream in %r"
+                                 % (probed,))
+                audio_streams = [stream for stream in probed["streams"]
+                                 if stream.get("codec_type") == "audio"]
+                self.assertEqual(len(audio_streams), 1,
+                                 "missing audio stream in %r: "
+                                 "make_clip defaults to audio='tone'"
+                                 % (probed,))
+                audio = audio_streams[0]
+                self.assertEqual(audio["codec_name"], "pcm_s16le")
+                self.assertEqual(audio["sample_rate"], "48000")
                 video = _video_stream(probed)
                 if "nb_frames" in video:
                     got_frames = int(video["nb_frames"])
@@ -145,13 +159,11 @@ class TestMedia(unittest.TestCase):
                 # priming/padding stretched the audio and container by
                 # ~23 ms on some ffmpeg builds.
                 audio_tolerance = 1.5 / 48000
-                for stream in probed["streams"]:
-                    if stream.get("codec_type") == "audio":
-                        with self.subTest(part="audio"):
-                            self.assertLessEqual(
-                                abs(float(stream["duration"])
-                                    - float(want_duration)),
-                                audio_tolerance)
+                with self.subTest(part="audio"):
+                    self.assertLessEqual(
+                        abs(float(audio["duration"])
+                            - float(want_duration)),
+                        audio_tolerance)
 
     def test_clip_creation_date(self):
         moment = datetime(2020, 1, 2, 3, 4, 5, tzinfo=_UTC)

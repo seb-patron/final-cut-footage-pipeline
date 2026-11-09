@@ -33,6 +33,24 @@ class TestTime(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'frame-aligned range exceeds native source'):
             check_frame_range(lo2, hi2, Fraction(0), Fraction(12), Fraction(0), Fraction(9))
 
+    def test_empty_range_refused(self):
+        # An empty range (lo == hi) inside the browser clip is refused by
+        # the browser-clip check, which runs first: the native-source
+        # check's own ``lo < hi`` is unreachable on its own, so it needs
+        # no separate case.
+        with self.assertRaisesRegex(
+                ValueError, 'frame-aligned range exceeds browser clip'):
+            check_frame_range(Fraction(1, 2), Fraction(1, 2),
+                              Fraction(0), Fraction(1),
+                              Fraction(0), Fraction(10))
+        # A range with lo < hi touching both far edges exactly is
+        # accepted (returns None), pinning the boundary from both sides.
+        with self.subTest("touching-both-edges"):
+            self.assertIsNone(check_frame_range(
+                Fraction(0), Fraction(1),
+                Fraction(0), Fraction(1),
+                Fraction(0), Fraction(1)))
+
     def test_hour_origin(self):
         fd = Fraction(1001, 30000)
         origin = Fraction(3600)

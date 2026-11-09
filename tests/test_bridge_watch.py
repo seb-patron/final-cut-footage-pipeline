@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import traceback
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -88,6 +89,80 @@ def _append_byte(path):
 def _missing_dtd(folder):
     """Return a DTD folder path that does not exist, inside ``folder``."""
     return os.path.join(folder, "no-such-dtd")
+
+
+_WATCH_FILE = os.path.realpath(watch_module.__file__)
+
+
+class _OpenRecorder:
+    """Record the watcher module's ``os.open`` calls and the identity
+    of every fd they return.
+
+    The wrapper delegates to the real ``os.open`` and fstats each
+    returned fd immediately, closing nothing the module still owns.
+    Calls from any other module (the test's own swap helpers, library
+    internals) are passed through unrecorded, so the proof covers only
+    what the watcher itself opens.
+    """
+
+    def __init__(self, real_open, outside):
+        self._real_open = real_open
+        self.calls = []
+        self.identities = []
+        # Resolve both sides: on macOS /var is a symlink to /private/var.
+        self.outside = os.path.realpath(outside)
+        opened_stat = os.stat(outside)
+        self.outside_identity = (opened_stat.st_dev, opened_stat.st_ino)
+
+    def __call__(self, path, flags, *args, **kwargs):
+        # Only the candidate opens in ``_read_candidate_bytes`` count:
+        # the swap itself runs inside ``watch_export``'s stack, so any
+        # frame of the module would also match the test's own helpers.
+        stack = traceback.extract_stack()
+        if not any(os.path.realpath(frame.filename) == _WATCH_FILE
+                   and frame.name == "_read_candidate_bytes"
+                   for frame in stack):
+            return self._real_open(path, flags, *args, **kwargs)
+        self.calls.append((path, flags, kwargs.get("dir_fd")))
+        fd = self._real_open(path, flags, *args, **kwargs)
+        try:
+            opened_stat = os.fstat(fd)
+            self.identities.append(
+                (opened_stat.st_dev, opened_stat.st_ino))
+        except OSError:
+            pass
+        return fd
+
+
+def _assert_no_follow_opens(test_case, recorder, candidate_names):
+    """Prove the candidate opens were no-follow and the outside file
+    was never opened.
+
+    This proof does not rely on the later signature check, the
+    REFUSED status or the missing DTD folder: it fails as soon as any
+    candidate open lacks ``O_NOFOLLOW`` or any opened fd is the
+    outside file.
+    """
+    # ``watch_module.os`` is the very ``os`` module, so patching its
+    # ``open`` sees the dir_fd opens too.
+    test_case.assertIs(watch_module.os, os)
+    named = [call for call in recorder.calls
+             if isinstance(call[0], str)
+             and os.path.basename(call[0]) in candidate_names]
+    test_case.assertTrue(named, "no recorded open named the candidate")
+    for path, flags, _dir_fd in named:
+        test_case.assertTrue(
+            flags & os.O_NOFOLLOW,
+            "candidate open without O_NOFOLLOW: %r" % (path,))
+    for path, _flags, _dir_fd in recorder.calls:
+        if isinstance(path, str):
+            test_case.assertNotEqual(
+                os.path.realpath(path), recorder.outside,
+                "opened the outside file: %r" % (path,))
+    for identity in recorder.identities:
+        test_case.assertNotEqual(
+            identity, recorder.outside_identity,
+            "an opened fd is the outside file")
 
 
 class TestWatch(unittest.TestCase):
@@ -442,6 +517,8 @@ class TestWatch(unittest.TestCase):
                                       % symlink_reason)
 
     def test_symlink_swap_just_before_check_is_refused(self):
+        if not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("os.O_NOFOLLOW is missing on this platform")
         with tempfile.TemporaryDirectory() as tmp:
             with tempfile.TemporaryDirectory() as outer:
                 inside = DOCUMENT.encode("utf-8")
@@ -475,15 +552,20 @@ class TestWatch(unittest.TestCase):
                         swapped["done"] = True
                     return sig
 
+                recorder = _OpenRecorder(os.open, outside)
                 with mock.patch.dict(
                         os.environ,
                         {"FCP_DTD_DIR": _missing_dtd(tmp)}):
                     with mock.patch.object(
                             watch_module, "_signature",
                             side_effect=swapping_sig):
-                        results = watch_export(
-                            tmp, timeout=30, interval=0.5, settle=1.0,
-                            clock=fake.clock, sleep=fake.sleep)
+                        with mock.patch.object(
+                                watch_module.os, "open", wraps=os.open,
+                                side_effect=recorder):
+                            results = watch_export(
+                                tmp, timeout=30, interval=0.5, settle=1.0,
+                                clock=fake.clock, sleep=fake.sleep)
+                _assert_no_follow_opens(self, recorder, {"new.fcpxml"})
                 self.assertTrue(swapped["done"], "swap never ran")
                 self.assertEqual(len(results), 1)
                 result = results[0]
@@ -499,68 +581,76 @@ class TestWatch(unittest.TestCase):
                         + str(result.sha256))
                 self.assertNotIn("Outside Sentinel", blob)
 
-        with self.subTest("bundle-info-symlink"):
-            with tempfile.TemporaryDirectory() as tmp:
-                with tempfile.TemporaryDirectory() as outer:
-                    inside = DOCUMENT.encode("utf-8")
-                    outside_text = DOCUMENT.replace(
-                        "Invented Event", "Outside Bundle Sentinel QRS987")
-                    self.assertNotIn("Outside Bundle Sentinel", DOCUMENT)
-                    outside = os.path.join(outer, "outside.fcpxml")
-                    Path(outside).write_bytes(
-                        outside_text.encode("utf-8"))
-                    outside_hash = hashlib.sha256(
-                        outside_text.encode("utf-8")).hexdigest()
-                    bundle = os.path.join(tmp, "new.fcpxmld")
-                    info_path = os.path.join(bundle, "Info.fcpxml")
+    def test_bundle_info_symlink_swap_is_refused(self):
+        if not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("os.O_NOFOLLOW is missing on this platform")
+        with tempfile.TemporaryDirectory() as tmp:
+            with tempfile.TemporaryDirectory() as outer:
+                inside = DOCUMENT.encode("utf-8")
+                outside_text = DOCUMENT.replace(
+                    "Invented Event", "Outside Bundle Sentinel QRS987")
+                self.assertNotIn("Outside Bundle Sentinel", DOCUMENT)
+                outside = os.path.join(outer, "outside.fcpxml")
+                Path(outside).write_bytes(
+                    outside_text.encode("utf-8"))
+                outside_hash = hashlib.sha256(
+                    outside_text.encode("utf-8")).hexdigest()
+                bundle = os.path.join(tmp, "new.fcpxmld")
+                info_path = os.path.join(bundle, "Info.fcpxml")
 
-                    def make_bundle():
-                        os.mkdir(bundle)
-                        Path(info_path).write_bytes(inside)
+                def make_bundle():
+                    os.mkdir(bundle)
+                    Path(info_path).write_bytes(inside)
 
-                    fake = FakeClock()
-                    fake.steps.append(make_bundle)
-                    fake.steps.extend([lambda: None] * 10)
-                    original_sig = watch_module._signature
-                    swapped = {"done": False}
+                fake = FakeClock()
+                fake.steps.append(make_bundle)
+                fake.steps.extend([lambda: None] * 10)
+                original_sig = watch_module._signature
+                swapped = {"done": False}
 
-                    def swapping_bundle_sig(full, kind):
-                        import shutil
-                        sig = original_sig(full, kind)
-                        if (not swapped["done"] and full == bundle
-                                and sig is not None
-                                and sig is not watch_module._ABSENT
-                                and fake.now >= 1.5):
-                            if not os.path.islink(full):
-                                shutil.rmtree(full, ignore_errors=True)
-                                try:
-                                    os.symlink(outside, full)
-                                except FileExistsError:
-                                    pass
-                            swapped["done"] = True
-                        return sig
+                def swapping_bundle_sig(full, kind):
+                    import shutil
+                    sig = original_sig(full, kind)
+                    if (not swapped["done"] and full == bundle
+                            and sig is not None
+                            and sig is not watch_module._ABSENT
+                            and fake.now >= 1.5):
+                        if not os.path.islink(full):
+                            shutil.rmtree(full, ignore_errors=True)
+                            try:
+                                os.symlink(outside, full)
+                            except FileExistsError:
+                                pass
+                        swapped["done"] = True
+                    return sig
 
-                    with mock.patch.dict(
-                            os.environ,
-                            {"FCP_DTD_DIR": _missing_dtd(tmp)}):
+                recorder = _OpenRecorder(os.open, outside)
+                with mock.patch.dict(
+                        os.environ,
+                        {"FCP_DTD_DIR": _missing_dtd(tmp)}):
+                    with mock.patch.object(
+                            watch_module, "_signature",
+                            side_effect=swapping_bundle_sig):
                         with mock.patch.object(
-                                watch_module, "_signature",
-                                side_effect=swapping_bundle_sig):
+                                watch_module.os, "open", wraps=os.open,
+                                side_effect=recorder):
                             results = watch_export(
                                 tmp, timeout=30, interval=0.5, settle=1.0,
                                 clock=fake.clock, sleep=fake.sleep)
-                    self.assertTrue(swapped["done"], "bundle swap never ran")
-                    self.assertEqual(len(results), 1)
-                    result = results[0]
-                    self.assertEqual(result.path, bundle)
-                    self.assertEqual(result.check.status, REFUSED)
-                    self.assertIsNone(result.sha256)
-                    self.assertIsNone(result.check.sha256)
-                    self.assertNotEqual(result.sha256, outside_hash)
-                    blob = (repr(result.check.problems)
-                            + repr(result.check.status)
-                            + str(result.sha256))
-                    self.assertNotIn("Outside Bundle Sentinel", blob)
+                _assert_no_follow_opens(
+                    self, recorder, {"new.fcpxmld", "Info.fcpxml"})
+                self.assertTrue(swapped["done"], "bundle swap never ran")
+                self.assertEqual(len(results), 1)
+                result = results[0]
+                self.assertEqual(result.path, bundle)
+                self.assertEqual(result.check.status, REFUSED)
+                self.assertIsNone(result.sha256)
+                self.assertIsNone(result.check.sha256)
+                self.assertNotEqual(result.sha256, outside_hash)
+                blob = (repr(result.check.problems)
+                        + repr(result.check.status)
+                        + str(result.sha256))
+                self.assertNotIn("Outside Bundle Sentinel", blob)
 
     def test_watcher_creates_no_new_files_in_watched_folder(self):
         self.assertTrue(sys.dont_write_bytecode,
