@@ -158,6 +158,71 @@ class TestTrip(unittest.TestCase):
                 load_trip(trip)
             self.assertIn("[pipeline].offline", str(raised.exception))
 
+    def test_transcribe_model_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_project_trip(
+                Path(tmp),
+                contract_text(
+                    pipeline_extra="[pipeline.transcribe]\n"
+                    'model = "mlx-community/whisper-small-mlx"\n'
+                ),
+            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                settings = load_trip(trip)
+            self.assertEqual(
+                settings.transcribe_model, "mlx-community/whisper-small-mlx"
+            )
+            self.assertEqual(caught, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_project_trip(Path(tmp), contract_text())
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                settings = load_trip(trip)
+            self.assertIsNone(settings.transcribe_model)
+            self.assertEqual(caught, [])
+
+    def test_transcribe_table_rejects_bad_model(self):
+        cases = {
+            "int model": "[pipeline.transcribe]\nmodel = 3\n",
+            "empty model": '[pipeline.transcribe]\nmodel = ""\n',
+            "missing model": "[pipeline.transcribe]\n",
+            "not a table": 'transcribe = "mlx-community/whisper-small-mlx"\n',
+        }
+        for name, extra in cases.items():
+            with self.subTest(case=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    trip = write_project_trip(
+                        Path(tmp), contract_text(pipeline_extra=extra)
+                    )
+                    with self.assertRaises(TripSettingsError) as raised:
+                        load_trip(trip)
+                    self.assertIn(
+                        "[pipeline.transcribe].model", str(raised.exception)
+                    )
+
+    def test_unknown_transcribe_key_warns_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_project_trip(
+                Path(tmp),
+                contract_text(
+                    pipeline_extra="[pipeline.transcribe]\n"
+                    'model = "mlx-community/whisper-small-mlx"\n'
+                    'harbor_note = "extra"\n'
+                ),
+            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                settings = load_trip(trip)
+            self.assertEqual(
+                settings.transcribe_model, "mlx-community/whisper-small-mlx"
+            )
+            self.assertEqual(len(caught), 1)
+            self.assertTrue(issubclass(caught[0].category, UserWarning))
+            self.assertIn(
+                "[pipeline.transcribe].harbor_note", str(caught[0].message)
+            )
+
     def test_minimal_fixture_loads(self):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")

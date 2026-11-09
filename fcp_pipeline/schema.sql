@@ -60,3 +60,22 @@ CREATE TABLE exports (
     sha256 TEXT NOT NULL,
     read_at TEXT NOT NULL
 );
+CREATE TABLE transcript_segments (
+    id INTEGER PRIMARY KEY,
+    transcript_id INTEGER NOT NULL REFERENCES transcripts(id),
+    idx INTEGER NOT NULL,
+    start TEXT NOT NULL,
+    stop TEXT NOT NULL,
+    text TEXT NOT NULL,
+    UNIQUE (transcript_id, idx)
+);
+CREATE TABLE transcript_words (
+    id INTEGER PRIMARY KEY,
+    segment_id INTEGER NOT NULL REFERENCES transcript_segments(id),
+    idx INTEGER NOT NULL,
+    start TEXT NOT NULL,
+    stop TEXT NOT NULL,
+    word TEXT NOT NULL,
+    probability REAL,
+    UNIQUE (segment_id, idx)
+);

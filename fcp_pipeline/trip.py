@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 #: Pipeline-owned keys: they belong under ``[pipeline]``, never at top level.
-TOP_LEVEL_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline", "ai")
+TOP_LEVEL_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline", "ai", "transcribe")
 #: Accepted top-level keys and tables; anything else warns exactly once.
 KNOWN_TOP_LEVEL_KEYS = (
     "title",
@@ -35,7 +35,9 @@ KNOWN_TOP_LEVEL_KEYS = (
     "pipeline",
 )
 #: Keys the pipeline owns inside ``[pipeline]``; anything else warns exactly once.
-KNOWN_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline", "ai")
+KNOWN_PIPELINE_KEYS = ("timezone", "start_date", "clock_offsets", "places", "offline", "ai", "transcribe")
+#: Keys accepted inside the ``[pipeline.transcribe]`` table.
+TRANSCRIBE_KEYS = ("model",)
 #: AI step tables that may appear under ``[pipeline.ai]``.
 AI_STEP_TABLES = ("tag", "photos", "memo", "organize", "roughcut")
 #: Transcription tables under ``[pipeline.ai]``; they never inherit [pipeline.ai].
@@ -213,6 +215,37 @@ def _validate_ai_table(raw) -> dict:
             )
     return out
 
+def _validate_transcribe_table(raw) -> str | None:
+    """Validate the ``[pipeline.transcribe]`` table into a model id or None.
+
+    An absent table gives None. A table that is not a table, or whose
+    ``model`` is not a non-empty string, raises
+    :class:`TripSettingsError` naming ``[pipeline.transcribe].model``;
+    any other key inside it warns once with :class:`UserWarning`.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise TripSettingsError(
+            "project.toml key '[pipeline.transcribe].model' must be a "
+            "non-empty string (the [pipeline.transcribe] table is not a table)"
+        )
+    model = raw.get("model")
+    if not isinstance(model, str) or not model:
+        raise TripSettingsError(
+            "project.toml key '[pipeline.transcribe].model' must be a "
+            "non-empty string"
+        )
+    for key in raw:
+        if key not in TRANSCRIBE_KEYS:
+            warnings.warn(
+                f"unknown project.toml key: [pipeline.transcribe].{key}",
+                UserWarning,
+                stacklevel=2,
+            )
+    return model
+
+
 _CLOCK_OFFSET_RE = re.compile(r"([+-]?)([0-9]+):([0-5][0-9]):([0-5][0-9])")
 
 
@@ -242,6 +275,7 @@ class TripSettings:
     contact_sheets: Path | None = None
     pipeline: Path | None = None
     scratch: Path | None = None
+    transcribe_model: str | None = None
 
     @property
     def name(self) -> str:
@@ -329,6 +363,8 @@ def load_trip(folder: str | Path) -> TripSettings:
 
     ai = _validate_ai_table(pipeline.get("ai", {}))
 
+    transcribe_model = _validate_transcribe_table(pipeline.get("transcribe"))
+
     final_cut = data.get("final_cut", {})
     if not isinstance(final_cut, dict):
         raise TripSettingsError("project.toml table '[final_cut]' must be a table")
@@ -384,4 +420,5 @@ def load_trip(folder: str | Path) -> TripSettings:
         contact_sheets=folder / "contact-sheets",
         pipeline=folder / ".pipeline",
         scratch=folder / ".scratch",
+        transcribe_model=transcribe_model,
     )

@@ -12,7 +12,7 @@ Until then, the catalog only opens, upgrades, checks and exports.
 
 ## What it holds
 
-Five tables:
+Seven tables:
 
 - **media**: one row per media file. A stable string id, the kind of file
   (clip, still, memo or voiceover), its path, the file's size, modification
@@ -26,6 +26,12 @@ Five tables:
   status. See "Tag sources" below.
 - **transcripts**: one row per transcript file for a media file, with its
   path, checksum, language, engine and creation time.
+- **transcript_segments**: one row per transcribed segment of a
+  transcript file, with its position, exact start and stop times and
+  text.
+- **transcript_words**: one row per transcribed word of a segment, with
+  its position, exact start and stop times, the word itself and an
+  optional confidence from 0 to 1.
 - **runs**: one row per pipeline step that ran, with its start and finish
   times, whether it was a dry run, and its outcome.
 - **exports**: one row per file a run produced, with its path, checksum and
@@ -64,12 +70,22 @@ is freely replaced by the next value for the same label and time range.
 ## Schema versions
 
 The catalog stamps its layout with a schema version. The current version is
-2. Opening an older file upgrades it to the current layout in one step and
-keeps every row. Opening a file stamped with a newer version than the
-pipeline knows is refused, and the file is left completely untouched: same
-bytes, same modification time, no extra files. A file with tables but no
-version stamp is not a catalog, and opening it is refused the same way. An
-empty database simply gets the current layout.
+3: version 2 added the exports table, and version 3 adds the transcript
+segment and word tables. Opening an older file upgrades it to the current
+layout in one step and keeps every row. Opening a file stamped with a newer
+version than the pipeline knows is refused, and the file is left completely
+untouched: same bytes, same modification time, no extra files. A file with
+tables but no version stamp is not a catalog, and opening it is refused the
+same way. An empty database simply gets the current layout.
+
+A transcript file set is recorded with `add_transcript_set`, which stores
+one transcripts row per file plus the segments and words under the
+word-level file's row, all in one transaction: any failure rolls
+everything back and leaves no row. `list_transcript_segments` reads a
+transcript's segments back in order with their words in order, times as
+exact fractions. Segment and word times refuse floats, and a word whose
+start falls after its stop, or whose confidence is outside 0 to 1, is
+refused before anything is written.
 
 ## Where the file lives, and its checks
 

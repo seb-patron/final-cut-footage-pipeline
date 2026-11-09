@@ -19,7 +19,7 @@ import re
 import sqlite3
 import stat as stat_module
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -37,13 +37,16 @@ __all__ = [
     "SOURCE_RANK",
     "TagRecord",
     "TranscriptRecord",
+    "TranscriptSegmentRecord",
+    "TranscriptWordRecord",
     "export_assets_tsv",
     "main",
 ]
 
 #: Current schema version. Version 1 is the same catalog without the
-#: exports table; version 2 adds it.
-SCHEMA_VERSION = 2
+#: exports table; version 2 adds it; version 3 adds the transcript
+#: segment and word tables.
+SCHEMA_VERSION = 3
 
 #: Allowed media kinds, tag sources (lowest to highest rank) and tag statuses.
 KINDS = ("clip", "still", "memo", "voiceover")
@@ -145,6 +148,28 @@ class TranscriptRecord:
 
 
 @dataclass
+class TranscriptWordRecord:
+    """One transcribed word with its exact time range."""
+
+    idx: int | None = None
+    start: Fraction | None = None
+    stop: Fraction | None = None
+    word: str | None = None
+    probability: float | None = None
+
+
+@dataclass
+class TranscriptSegmentRecord:
+    """One transcribed segment with its words in order."""
+
+    idx: int | None = None
+    start: Fraction | None = None
+    stop: Fraction | None = None
+    text: str | None = None
+    words: list[TranscriptWordRecord] = field(default_factory=list)
+
+
+@dataclass
 class RunRecord:
     """One run row."""
 
@@ -233,6 +258,19 @@ def _from_fraction_text(text: str | None, *, name: str) -> Fraction | None:
     return Fraction(numerator, denominator)
 
 
+def _stored_fraction(value: Fraction | int | None) -> Fraction | None:
+    """Return a validated time value as a :class:`Fraction`, or None.
+
+    Call only after :func:`_to_fraction_text` has accepted the value,
+    so bools and floats are already refused.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Fraction):
+        return value
+    return Fraction(value, 1)
+
+
 def _require_text(value: object, *, name: str) -> str:
     if not isinstance(value, str):
         raise CatalogError(f"bad {name} {value!r}: must be a string")
@@ -290,15 +328,20 @@ def _split_statements(sql: str) -> list[str]:
 def _upgrades() -> dict[int, str]:
     """Ordered mapping from each version to the SQL upgrading the one before it.
 
-    Version 1 is the current schema without the exports table, so the
-    version 2 upgrade is the exact exports-table statement sliced out of
-    ``schema.sql``: a file upgraded with it ends up byte-identical in
-    ``sqlite_master`` to a fresh catalog.
+    Version 1 is the current schema without the exports table and the
+    transcript segment/word tables; each slice below is cut out of
+    ``schema.sql`` by its marker, so a file upgraded with them ends up
+    identical in ``sqlite_master`` to a fresh catalog.
     """
     schema = _schema_sql()
-    marker = "CREATE TABLE exports"
-    start = schema.index(marker)
-    return {2: schema[start:].strip()}
+    exports_marker = "CREATE TABLE exports"
+    segments_marker = "CREATE TABLE transcript_segments"
+    exports_start = schema.index(exports_marker)
+    segments_start = schema.index(segments_marker)
+    return {
+        2: schema[exports_start:segments_start].strip(),
+        3: schema[segments_start:].strip(),
+    }
 
 
 def _fresh_statements() -> list[str]:
@@ -1007,6 +1050,243 @@ class Catalog:
             raise CatalogError(
                 f"bad transcript for media {media_id}: {exc}"
             ) from None
+
+    @staticmethod
+    def _check_probability(value: object, *, name: str) -> float | None:
+        """Validate an optional word confidence between 0 and 1."""
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise CatalogError(
+                f"bad {name} {value!r}: must be None or a number from 0 to 1"
+            )
+        probability = float(value)
+        if not 0 <= probability <= 1:
+            raise CatalogError(
+                f"bad {name} {value!r}: must be None or a number from 0 to 1"
+            )
+        return probability
+
+    @staticmethod
+    def _check_range(
+        start: Fraction | None, stop: Fraction | None, *, name: str
+    ) -> None:
+        """Refuse a time range whose start falls after its stop."""
+        if start is not None and stop is not None and start > stop:
+            raise CatalogError(
+                f"bad {name} {start!r} to {stop!r}: "
+                "start must not fall after stop"
+            )
+
+    def add_transcript_set(
+        self,
+        media_id: int,
+        *,
+        files: object,
+        language: object,
+        engine: object,
+        created: object,
+        segments: object,
+    ) -> list[int]:
+        """Record one transcript file set with its segments and words.
+
+        ``files`` is a sequence of ``(path, sha256)`` pairs; one
+        transcripts row is inserted per file with the same validation as
+        :meth:`add_transcript`. ``segments`` is a sequence of
+        :class:`TranscriptSegmentRecord` stored under the row of the file
+        whose path ends in ``".json"``; when there is not exactly one
+        such file this raises :class:`CatalogError`. Everything happens
+        in one transaction: any failure rolls everything back and leaves
+        no row. Returns the new transcripts ids in file order.
+        """
+        media_id = _require_int(media_id, name="media_id")
+        if not isinstance(files, (list, tuple)):
+            raise CatalogError(
+                f"bad files {files!r}: must be a sequence of (path, sha256) pairs"
+            )
+        pairs = list(files)
+        if not isinstance(segments, (list, tuple)):
+            raise CatalogError(
+                f"bad segments {segments!r}: must be a sequence of "
+                "TranscriptSegmentRecord"
+            )
+        segment_list = list(segments)
+        if not isinstance(language, (str, type(None))):
+            raise CatalogError(
+                f"bad language {language!r}: must be a string or None"
+            )
+        if not isinstance(engine, (str, type(None))):
+            raise CatalogError(
+                f"bad engine {engine!r}: must be a string or None"
+            )
+        created_text = _check_utc(created, name="created")
+        json_positions = [
+            index
+            for index, pair in enumerate(pairs)
+            if isinstance(pair, (list, tuple))
+            and len(pair) == 2
+            and isinstance(pair[0], str)
+            and pair[0].endswith(".json")
+        ]
+        if len(json_positions) != 1:
+            raise CatalogError(
+                f"bad files for media {media_id}: expected exactly one "
+                'path ending in ".json", found '
+                f"{len(json_positions)}"
+            )
+        connection = self._ensure_open()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            ids: list[int] = []
+            for pair in pairs:
+                if (
+                    not isinstance(pair, (list, tuple))
+                    or len(pair) != 2
+                ):
+                    raise CatalogError(
+                        f"bad file {pair!r}: must be a (path, sha256) pair"
+                    )
+                file_path, file_sha = pair
+                cursor = connection.execute(
+                    "INSERT INTO transcripts (media_id, path, sha256, "
+                    "language, engine, created) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        media_id,
+                        _require_text(file_path, name="transcript path"),
+                        _optional_text(file_sha, name="sha256"),
+                        language,
+                        engine,
+                        created_text,
+                    ),
+                )
+                ids.append(int(cursor.lastrowid))
+            transcript_id = ids[json_positions[0]]
+            for segment in segment_list:
+                if not isinstance(segment, TranscriptSegmentRecord):
+                    raise CatalogError(
+                        f"bad segment {segment!r}: must be a "
+                        "TranscriptSegmentRecord"
+                    )
+                if not isinstance(segment.words, list):
+                    raise CatalogError(
+                        f"bad words for segment {segment.idx!r}: "
+                        "must be a list of TranscriptWordRecord"
+                    )
+                start_text = _to_fraction_text(
+                    segment.start, name="segment start"
+                )
+                stop_text = _to_fraction_text(segment.stop, name="segment stop")
+                self._check_range(
+                    _stored_fraction(segment.start),
+                    _stored_fraction(segment.stop),
+                    name="segment",
+                )
+                segment_cursor = connection.execute(
+                    "INSERT INTO transcript_segments (transcript_id, idx, "
+                    "start, stop, text) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        transcript_id,
+                        _require_int(segment.idx, name="segment idx"),
+                        start_text,
+                        stop_text,
+                        _require_text(segment.text, name="segment text"),
+                    ),
+                )
+                segment_id = int(segment_cursor.lastrowid)
+                for word in segment.words:
+                    if not isinstance(word, TranscriptWordRecord):
+                        raise CatalogError(
+                            f"bad word {word!r}: must be a "
+                            "TranscriptWordRecord"
+                        )
+                    word_start_text = _to_fraction_text(
+                        word.start, name="word start"
+                    )
+                    word_stop_text = _to_fraction_text(
+                        word.stop, name="word stop"
+                    )
+                    self._check_range(
+                        _stored_fraction(word.start),
+                        _stored_fraction(word.stop),
+                        name="word",
+                    )
+                    connection.execute(
+                        "INSERT INTO transcript_words (segment_id, idx, "
+                        "start, stop, word, probability) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            segment_id,
+                            _require_int(word.idx, name="word idx"),
+                            word_start_text,
+                            word_stop_text,
+                            _require_text(word.word, name="word"),
+                            self._check_probability(
+                                word.probability, name="probability"
+                            ),
+                        ),
+                    )
+            connection.commit()
+            return ids
+        except CatalogError:
+            connection.rollback()
+            raise
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise CatalogError(
+                f"bad transcript set for media {media_id}: {exc}"
+            ) from None
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def list_transcript_segments(
+        self, transcript_id: int
+    ) -> list[TranscriptSegmentRecord]:
+        """Return every segment for a transcript row with its words.
+
+        Segments come back in ``idx`` order with their words in ``idx``
+        order; times are exact :class:`~fractions.Fraction` values.
+        """
+        _require_int(transcript_id, name="transcript_id")
+        connection = self._ensure_open()
+        out: list[TranscriptSegmentRecord] = []
+        for row in connection.execute(
+            "SELECT * FROM transcript_segments WHERE transcript_id = ? "
+            "ORDER BY idx",
+            (transcript_id,),
+        ):
+            words = [
+                TranscriptWordRecord(
+                    idx=word_row["idx"],
+                    start=_from_fraction_text(
+                        word_row["start"], name="word start"
+                    ),
+                    stop=_from_fraction_text(
+                        word_row["stop"], name="word stop"
+                    ),
+                    word=word_row["word"],
+                    probability=word_row["probability"],
+                )
+                for word_row in connection.execute(
+                    "SELECT * FROM transcript_words WHERE segment_id = ? "
+                    "ORDER BY idx",
+                    (row["id"],),
+                )
+            ]
+            out.append(
+                TranscriptSegmentRecord(
+                    idx=row["idx"],
+                    start=_from_fraction_text(
+                        row["start"], name="segment start"
+                    ),
+                    stop=_from_fraction_text(
+                        row["stop"], name="segment stop"
+                    ),
+                    text=row["text"],
+                    words=words,
+                )
+            )
+        return out
 
     def list_transcripts(self, media_id: int) -> list[TranscriptRecord]:
         """Return every transcript for a media row in id order."""
