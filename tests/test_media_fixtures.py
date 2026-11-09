@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 
 from tests import media_fixtures
@@ -87,6 +88,59 @@ class TestMedia(unittest.TestCase):
                 self.assertEqual(video["tags"]["timecode"],
                                  "01:00:00:00")
                 self.assertEqual(clip.suffix, ".mov")
+
+    def test_clip_whole_frame_durations(self):
+        cases = (
+            ("30000/1001", 1, 30, Fraction(1001, 1000)),
+            ("25/1", 1, 25, Fraction(1, 1)),
+            # Not frame-aligned: round(1.01 x 24000/1001) is 24, so the
+            # clip is 24 frames = 1001/1000 s (a "-t 1.01" trim would
+            # instead stretch the container to 1.01 s of audio). A
+            # distinct rate keeps this case's cache entry separate from
+            # the 1-second cases above, which share one file per rate
+            # once their requests round to the same frame count.
+            ("24000/1001", 1.01, 24, Fraction(1001, 1000)),
+        )
+        for rate, seconds, want_frames, want_duration in cases:
+            with self.subTest(rate=rate, seconds=seconds):
+                self.assertEqual(
+                    media_fixtures.clip_frames(seconds, rate), want_frames)
+                self.assertEqual(
+                    media_fixtures.clip_duration(seconds, rate),
+                    want_duration)
+                clip = make_clip(seconds=seconds, rate=rate)
+                probed = _probe(clip)
+                video = _video_stream(probed)
+                if "nb_frames" in video:
+                    got_frames = int(video["nb_frames"])
+                else:
+                    ffprobe = _require_ffprobe()
+                    completed = subprocess.run(
+                        [ffprobe, "-hide_banner", "-v", "error",
+                         "-select_streams", "v:0", "-count_frames",
+                         "-show_entries", "stream=nb_read_frames",
+                         "-of", "json", str(clip)],
+                        check=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, timeout=300)
+                    counted = json.loads(
+                        completed.stdout.decode("utf-8"))
+                    got_frames = int(
+                        counted["streams"][0]["nb_read_frames"])
+                self.assertEqual(got_frames, want_frames)
+                half_frame = float(
+                    Fraction(1, 1) / media_fixtures._parse_rate(rate)) / 2
+                for label, text in (
+                        ("video", video["duration"]),
+                        ("format", probed["format"]["duration"])):
+                    with self.subTest(part=label):
+                        self.assertLessEqual(
+                            abs(float(text) - float(want_duration)),
+                            half_frame)
+                for stream in probed["streams"]:
+                    if stream.get("codec_type") == "audio":
+                        with self.subTest(part="audio"):
+                            self.assertLessEqual(float(stream["duration"]),
+                                                 float(video["duration"]))
 
     def test_clip_creation_date(self):
         moment = datetime(2020, 1, 2, 3, 4, 5, tzinfo=_UTC)

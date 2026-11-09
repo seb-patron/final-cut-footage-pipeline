@@ -3,8 +3,12 @@
 Generators (all cached, see below):
 
 - :func:`make_clip`: a short QuickTime ``.mov`` (or ``.mp4``) clip with an
-  exact frame rate, pixel size, duration, start timecode and a few
-  QuickTime metadata keys.
+  exact frame rate, pixel size, whole-frame duration (see below),
+  start timecode and a few QuickTime metadata keys. The requested
+  seconds are converted to ``round(seconds x rate)`` frames and the
+  clip is encoded by frame count, so the actual duration is exactly
+  ``frames / rate`` (for example, 1 s at 30000/1001 is 30 frames =
+  1001/1000 s); see :func:`clip_frames` and :func:`clip_duration`.
 - :func:`make_still`: a single-frame JPEG of a given pixel size, optionally
   stamped with EXIF dates via exiftool.
 - :func:`make_audio`: a 16-bit PCM WAV holding a 440 Hz tone or silence.
@@ -40,6 +44,7 @@ import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 
 #: Reason fragment used when the ffmpeg tooling is missing.
@@ -146,11 +151,63 @@ def _check_size(size):
     return width, height
 
 
+def _parse_rate(rate):
+    """Return ``rate`` as a :class:`~fractions.Fraction` of frames/second."""
+    try:
+        parsed = Fraction(str(rate).strip())
+    except (ValueError, ZeroDivisionError) as exc:
+        raise ValueError("rate must be 'NUM/DEN' or 'NUM', got %r"
+                         % (rate,)) from exc
+    if parsed <= 0:
+        raise ValueError("rate must be positive, got %r" % (rate,))
+    return parsed
+
+
+def clip_frames(seconds, rate):
+    """Return the whole-frame count for a ``seconds``-long clip at ``rate``.
+
+    The requested seconds are converted to ``round(seconds x rate)``
+    frames; the result is always at least one frame. Raises
+    :class:`ValueError` for non-positive or non-numeric seconds and for
+    rates :func:`_parse_rate` rejects.
+    """
+    try:
+        requested = float(seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("seconds must be a positive number, got %r"
+                         % (seconds,)) from exc
+    if not requested > 0 or requested in (float("inf"), float("-inf")):
+        raise ValueError("seconds must be a positive number, got %r"
+                         % (seconds,))
+    frames = int(round(requested * float(_parse_rate(rate))))
+    if frames < 1:
+        raise ValueError("seconds %r at rate %r is less than one frame"
+                         % (seconds, rate))
+    return frames
+
+
+def clip_duration(seconds, rate):
+    """Return the exact clip duration for ``seconds`` at ``rate``.
+
+    The result is ``Fraction(frames, 1) / rate`` where ``frames`` comes
+    from :func:`clip_frames`, so for example 1 s at 30000/1001 is
+    ``Fraction(1001, 1000)`` seconds (30 frames).
+    """
+    return Fraction(clip_frames(seconds, rate), 1) / _parse_rate(rate)
+
+
 def _build_clip(path, seconds, rate, size, start_timecode, creation_time,
                 make, model, location, audio, container):
-    """Run ffmpeg once to build a clip at ``path`` (no cache lookup)."""
+    """Run ffmpeg once to build a clip at ``path`` (no cache lookup).
+
+    The clip holds exactly ``clip_frames(seconds, rate)`` video frames:
+    encoding is limited with ``-frames:v`` (plus ``-shortest`` when an
+    audio stream is present), never with ``-t``, so the duration is
+    exactly ``clip_duration(seconds, rate)``.
+    """
     ffmpeg, _ = _require_ffmpeg()
     width, height = size
+    frames = clip_frames(seconds, rate)
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-f", "lavfi", "-i",
@@ -161,7 +218,10 @@ def _build_clip(path, seconds, rate, size, start_timecode, creation_time,
     elif audio == "silent":
         command += ["-f", "lavfi", "-i",
                     "anullsrc=sample_rate=48000:channel_layout=mono"]
-    command += ["-t", str(seconds), "-map", "0:v"]
+    command += ["-frames:v", str(frames)]
+    if audio is not None:
+        command += ["-shortest"]
+    command += ["-map", "0:v"]
     if audio is not None:
         command += ["-map", "1:a"]
     command += ["-c:v", "libx264", "-preset", "ultrafast", "-threads", "1",
@@ -194,14 +254,26 @@ def make_clip(seconds=1, rate="30000/1001", size=(64, 36),
               model=None, location=None, audio="tone", container="mov"):
     """Build (or reuse) a tiny QuickTime clip and return its path.
 
-    The clip holds exactly ``rate`` (ffprobe video ``r_frame_rate``),
-    ``seconds`` duration, ``size`` pixels and ``start_timecode``.
+    Whole-frame rule: the requested ``seconds`` are converted to
+    ``round(seconds x rate)`` frames (see :func:`clip_frames`), the clip
+    is encoded by frame count (``-frames:v``, plus ``-shortest`` when an
+    audio stream is present; never ``-t``), and the actual duration is
+    exactly ``frames / rate`` (see :func:`clip_duration`). For example,
+    1 s at 30000/1001 is 30 frames = 1001/1000 s, and 1 s at 25/1 is
+    25 frames = 1 s. The clip holds exactly ``rate`` (ffprobe video
+    ``r_frame_rate``), ``size`` pixels and ``start_timecode``.
     ``creation_time`` is an aware datetime written as the QuickTime
     creation date; ``None`` writes no creation date at all. ``make``,
     ``model`` and ``location`` (an ISO 6709 string) are written as the
     matching ``com.apple.quicktime.*`` keys; ``None`` writes nothing.
     ``audio`` is ``"tone"`` (440 Hz sine), ``"silent"`` or ``None`` (no
     audio stream). ``container`` is ``"mov"`` or ``"mp4"``.
+
+    The returned path's clip has the frame count and exact duration
+    recorded by :func:`clip_frames` and :func:`clip_duration` for the
+    same ``seconds`` and ``rate``. Requests that round to the same
+    frame count share one cached file, since their encodings are
+    identical.
     """
     _require_ffmpeg()
     if container not in ("mov", "mp4"):
@@ -213,7 +285,8 @@ def make_clip(seconds=1, rate="30000/1001", size=(64, 36),
     if not isinstance(rate, str) or not rate:
         raise ValueError("rate must be a non-empty string, got %r" % (rate,))
     width, height = _check_size(tuple(size))
-    key = _cache_key(("clip", float(seconds), rate, width, height,
+    frames = clip_frames(seconds, rate)
+    key = _cache_key(("clip", frames, rate, width, height,
                       start_timecode,
                       None if creation_time is None
                       else _qt_stamp(creation_time),
