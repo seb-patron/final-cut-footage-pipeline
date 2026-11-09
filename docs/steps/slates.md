@@ -73,8 +73,15 @@ check for you to confirm, and never dropped or guessed. An unknown
 place such as `Willow Quarry` becomes a Place keyword with a check;
 an unknown stock stays on the clip the same way. Only the first
 unknown remark becomes a keyword; further ones are skipped with a
-note. A slate word with nothing recognizable in it stores nothing at
-all.
+note, and that keyword stands only beside a recognized day, shot,
+stock or camera. A slate word with nothing recognizable in it stores
+nothing at all.
+
+The word `slate` itself has to announce a slate: `Slate.` / `Slate,`
+/ `Slate:` punctuation (or another sentence break), or a day, shot,
+stock or camera directly after it, as in `Slate Day 3`. A `slate`
+used as an ordinary word, such as `Slate roofs last long.`, is not a
+slate: the clip stores nothing and is reported as having no slate.
 
 Keywords from metadata, GPS or the editor always win over a spoken
 slate, and locked keywords are never touched: when the slate says

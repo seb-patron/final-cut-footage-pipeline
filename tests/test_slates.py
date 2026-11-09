@@ -643,6 +643,24 @@ class TestSlates(unittest.TestCase):
                 )
                 self.assertEqual(catalog.list_tags(media_ids["lone-slate"]), [])
 
+    def test_ordinary_word_slate_stores_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_trip(write_trip(tmp))
+            with Catalog.in_memory() as catalog:
+                media_ids = load_clips(
+                    catalog, tmp, ["ordinary-word", "ordinary-words"]
+                )
+                result = tag_slates(
+                    catalog, settings, vocabulary=camera_vocabulary(catalog, settings)
+                )
+                self.assertEqual(
+                    [entry.status for entry in result.entries],
+                    ["no-slate", "no-slate"],
+                )
+                for name in ("ordinary-word", "ordinary-words"):
+                    with self.subTest(clip=name):
+                        self.assertEqual(catalog.list_tags(media_ids[name]), [])
+
     def test_find_slate_positions(self):
         def segments(*items):
             return [
@@ -667,6 +685,13 @@ class TestSlates(unittest.TestCase):
         with self.subTest("mid-sentence slate word is not a slate"):
             self.assertIsNone(
                 find_slate(segments(("0.5", "2.0", "I will slate the shot later.")))
+            )
+        with self.subTest("slate as an ordinary word is not a slate"):
+            self.assertIsNone(
+                find_slate(segments(("0.5", "2.0", "Slate roofs last long.")))
+            )
+            self.assertIsNone(
+                find_slate(segments(("0.5", "2.0", "Slate roofs, slate paths.")))
             )
         with self.subTest("lowercase slate word counts"):
             slate = find_slate(segments(("0.5", "2.0", "slate. Day 3.")))

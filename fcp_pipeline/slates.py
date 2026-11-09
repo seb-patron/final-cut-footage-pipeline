@@ -1,7 +1,10 @@
 """Find spoken slates in stored transcripts and tag their parts.
 
 A spoken slate is the sentence a clip starts (or breaks) with, shaped
-like ``Slate. Day 3, <place>, B-roll, Portra 400 on the F3``. This step
+like ``Slate. Day 3, <place>, B-roll, Portra 400 on the F3``. The word
+``"slate"`` counts only when announcing punctuation or a recognized
+part follows it, so an ordinary ``Slate roofs last long.`` is not a
+slate and stores nothing. This step
 reads the transcripts already in the catalog (run transcribe first) and
 listens to nothing: for each clip it finds the slate sentence, turns
 each recognized part into a whole-clip catalog tag with source
@@ -338,9 +341,43 @@ _SENTENCE_ENDS = (". ", "! ", "? ")
 #: Punctuation (and space) stripped straight after the slate word.
 _LEADING_PUNCT_RE = re.compile(r"^[\s.,!?;:'\"()\[\]\-–—]+")
 
+#: Punctuation right after the word "slate" that announces a slate:
+#: a sentence break, a comma or a colon.
+_SLATE_ANNOUNCE_PUNCT = (".", "!", "?", ",", ":")
 
-def _slate_occurrences(segments) -> list[tuple[str, Fraction]]:
-    """Every slate start in a clip: its sentence text and its start time."""
+#: Folders that count as recognized slate parts. A leftover Place tag
+#: stands only beside one of these; anything else stores nothing.
+_RECOGNIZED_FOLDERS = ("Day", "Shot", "Stock", "Camera")
+
+
+def _starts_with_recognized_part(text: str, vocabulary) -> bool:
+    """Whether slate text opens with a genuinely recognized slate part.
+
+    Only the first event counts: the part must stand directly after
+    the word "slate". Leftover and Place parts never count, and neither
+    do unmatched stock or camera spellings kept as heard.
+    """
+    for kind, payload in _parse_events(text, vocabulary):
+        if kind != "part":
+            return False
+        return (
+            payload.folder in _RECOGNIZED_FOLDERS
+            and payload.status == "plain"
+        )
+    return False
+
+
+def _slate_occurrences(
+    segments, vocabulary=None
+) -> list[tuple[str, Fraction]]:
+    """Every slate start in a clip: its sentence text and its start time.
+
+    The word "slate" counts only when announcing punctuation (a
+    sentence break, a comma or a colon) follows it, or when a
+    recognized day, shot, stock or camera stands directly after it;
+    "slate" used as an ordinary word ("Slate roofs last long.") is
+    skipped. Without a vocabulary only Day N can announce this way.
+    """
     found: list[tuple[str, Fraction]] = []
     total = len(segments)
     for index, segment in enumerate(segments):
@@ -353,7 +390,17 @@ def _slate_occurrences(segments) -> list[tuple[str, Fraction]]:
                 valid = True
             else:
                 continue
-            slate = _LEADING_PUNCT_RE.sub("", text[match.end() :]).strip()
+            after = text[match.end() :]
+            if after[:1] in _SLATE_ANNOUNCE_PUNCT:
+                announced = True
+            else:
+                stripped = _LEADING_PUNCT_RE.sub("", after).strip()
+                announced = not stripped or _starts_with_recognized_part(
+                    stripped, vocabulary
+                )
+            if not announced:
+                continue
+            slate = _LEADING_PUNCT_RE.sub("", after).strip()
             slate = slate[:MAX_SLATE_CHARS]
             if not slate and index + 1 < total:
                 following = segments[index + 1]
@@ -371,16 +418,18 @@ def _slate_occurrences(segments) -> list[tuple[str, Fraction]]:
     return found
 
 
-def find_slate(segments) -> tuple[str, Fraction] | None:
+def find_slate(segments, vocabulary=None) -> tuple[str, Fraction] | None:
     """Return a clip's first slate sentence and its start time, or None.
 
     A slate starts at the word ``"slate"`` (case-insensitive, whole
     word) at the start of a segment's text or right after a sentence
-    end inside it. The text runs from that word on, less the word
+    end inside it, when announcing punctuation (a sentence break, a
+    comma or a colon) or a recognized day, shot, stock or camera
+    follows the word. The text runs from that word on, less the word
     itself and any punctuation straight after it; when nothing is left
     the text is the next segment's text, if it starts soon enough.
     """
-    occurrences = _slate_occurrences(segments)
+    occurrences = _slate_occurrences(segments, vocabulary)
     if not occurrences:
         return None
     return occurrences[0]
@@ -446,14 +495,16 @@ def _parse_events(text: str, vocabulary) -> list:
     """Split slate text into an ordered event list.
 
     Each event is ``("part", SlatePart)`` or ``("ignored", text)``: the
-    first leftover piece becomes a ``"check"`` Place part, further
-    leftovers become ``"ignored"`` events carrying the heard text.
+    first leftover piece becomes a ``"check"`` Place part, but only
+    beside a genuinely recognized day, shot, stock or camera part;
+    without one it stays ``"ignored"``, like every further leftover.
     """
     place_list, stock_list, camera_list, shot_list = _vocabulary_lists(
         vocabulary
     )
     events: list = []
     leftover_seen = False
+    leftover_index: int | None = None
     for raw_piece in _PIECE_SPLIT_RE.split(text):
         piece = raw_piece.strip()
         if not piece:
@@ -523,9 +574,18 @@ def _parse_events(text: str, vocabulary) -> list:
             continue
         if not leftover_seen:
             leftover_seen = True
+            leftover_index = len(events)
             events.append(("part", SlatePart(PLACE_FOLDER, piece, "check")))
         else:
             events.append(("ignored", piece))
+    if leftover_index is not None and not any(
+        kind == "part"
+        and payload.folder in _RECOGNIZED_FOLDERS
+        and payload.status == "plain"
+        for kind, payload in events
+    ):
+        _kind, payload = events[leftover_index]
+        events[leftover_index] = ("ignored", payload.value)
     return events
 
 
@@ -565,7 +625,7 @@ def _tag_clip(catalog, row, vocabulary, *, dry_run: bool) -> SlateEntry:
         return SlateEntry(
             path=row.path, asset_id=row.asset_id, status="no-transcript"
         )
-    occurrences = _slate_occurrences(segments)
+    occurrences = _slate_occurrences(segments, vocabulary)
     if not occurrences:
         return SlateEntry(path=row.path, asset_id=row.asset_id, status="no-slate")
     text, _moment = occurrences[0]
@@ -582,7 +642,10 @@ def _tag_clip(catalog, row, vocabulary, *, dry_run: bool) -> SlateEntry:
             continue
         seen.add(payload.folder)
         planned.append(payload)
-    if not planned:
+    if not any(
+        part.folder in _RECOGNIZED_FOLDERS and part.status == "plain"
+        for part in planned
+    ):
         return SlateEntry(
             path=row.path,
             asset_id=row.asset_id,
