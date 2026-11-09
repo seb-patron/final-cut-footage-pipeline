@@ -47,11 +47,16 @@ diff you have not read.
 
 ## DTD check
 
-`assert_dtd_valid` validates a file against the installed Final Cut Pro
-1.14 DTD with `xmllint --noout --nonet --dtdvalid`. The `FCP_DTD`
-environment variable overrides the DTD path. When the DTD file or
-`xmllint` is missing, the check raises `unittest.SkipTest` instead of
-failing.
+`assert_dtd_valid` validates a file through the offline check in
+`fcp_pipeline/bridge/check.py`. It calls `check_fcpxml` with media
+checking off, so a sample whose media `src` is a placeholder still
+passes. The `FCP_DTD` environment variable overrides the DTD with one
+file; otherwise the DTD for the file's own version comes from
+`FCP_DTD_DIR` or the installed copy, and `xmllint` reads the verdict.
+It returns `None` when the file validates, raises `unittest.SkipTest`
+naming the missing DTD file, folder or `xmllint` when the check cannot
+verify, and raises `AssertionError` naming the path and every problem
+when the file is invalid or refused.
 
 Apple's DTD is never committed to this repository. Only the installed
 copy is read, by `xmllint`; do not copy it into the repo.

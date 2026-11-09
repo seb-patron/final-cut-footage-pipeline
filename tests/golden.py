@@ -10,22 +10,24 @@ The public helpers are:
   uids, and per-test temporary-folder file URIs.
 - :func:`assert_golden`: compare a document with its golden file, which
   lives under ``tests/golden/``.
-- :func:`assert_dtd_valid`: validate a file against the installed copy of
-  the Final Cut Pro 1.14 DTD. The Apple DTD is never committed; only the
-  installed copy is read, by xmllint.
+- :func:`assert_dtd_valid`: validate a file through the offline check in
+  ``fcp_pipeline/bridge/check.py``, which reads xmllint's verdict against
+  the installed copy of the Final Cut Pro DTD for the file's own version.
+  The Apple DTD is never committed; only the installed copy is read, by
+  xmllint.
 """
 
 import difflib
 import os
 import re
-import shutil
-import subprocess
 import tempfile
 import unittest
 import urllib.parse
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import escape, quoteattr
+
+from fcp_pipeline.bridge.check import CANNOT_VERIFY, VALID, check_fcpxml
 
 DEFAULT_DTD_PATH = (
     "/Applications/Final Cut Pro.app/Contents/Frameworks/"
@@ -295,24 +297,48 @@ def assert_golden(xml_bytes, name, *, golden_dir=None):
     )
 
 
-def assert_dtd_valid(path):
-    """Validate a file against the installed Final Cut Pro 1.14 DTD.
+def _format_check_problem(problem):
+    """Render one check problem with its line and element when known."""
+    location = ""
+    if problem.line is not None:
+        location += "line %s" % (problem.line,)
+    if problem.element is not None:
+        if location:
+            location += " "
+        location += "element %s" % (problem.element,)
+    if location:
+        return "%s: %s" % (location, problem.message)
+    return problem.message
 
-    The DTD path comes from FCP_DTD and defaults to the installed copy.
-    Raises unittest.SkipTest naming the DTD when its file is missing, or
-    naming xmllint when it is not on PATH.
+
+def assert_dtd_valid(path):
+    """Validate a file through the offline FCPXML check.
+
+    Calls :func:`fcp_pipeline.bridge.check.check_fcpxml` with media
+    checking off, so a sample whose media ``src`` is a placeholder still
+    passes. The DTD path comes from FCP_DTD and overrides the DTD file;
+    otherwise the DTD for the file's own version comes from FCP_DTD_DIR
+    or the installed copy. Returns None when the file validates. Raises
+    unittest.SkipTest naming the missing DTD file, folder or xmllint when
+    the check cannot verify, and AssertionError naming the path and every
+    problem (element and line where known) when it is invalid or refused.
     """
-    dtd_path = Path(os.environ.get("FCP_DTD", DEFAULT_DTD_PATH))
-    if not dtd_path.is_file():
-        raise unittest.SkipTest("Final Cut 1.14 DTD not found: %s" % dtd_path)
-    xmllint = shutil.which("xmllint")
-    if xmllint is None:
-        raise unittest.SkipTest("xmllint not on PATH; cannot validate %s" % path)
-    result = subprocess.run(
-        [xmllint, "--noout", "--nonet", "--dtdvalid",
-         dtd_path.resolve().as_uri(), str(path)],
-        capture_output=True, text=True, check=False,
-    )
-    if result.returncode != 0:
-        raise AssertionError("xmllint rejected %s:\n%s" % (path, result.stderr or result.stdout))
-    return None
+    override = os.environ.get("FCP_DTD")
+    dtd_path = Path(override) if override else None
+    if dtd_path is not None and not dtd_path.is_file():
+        raise unittest.SkipTest("Final Cut DTD not found: %s" % dtd_path)
+    result = check_fcpxml(path, check_media=False, dtd_path=dtd_path)
+    if result.status == VALID:
+        return None
+    if result.status == CANNOT_VERIFY:
+        reason = "; ".join(problem.message for problem in result.problems)
+        if not reason:
+            reason = "no reason recorded"
+        raise unittest.SkipTest(
+            "cannot verify %s: %s" % (path, reason))
+    details = "; ".join(
+        _format_check_problem(problem) for problem in result.problems)
+    if not details:
+        details = result.status
+    raise AssertionError(
+        "%s failed the offline FCPXML check: %s" % (path, details))
