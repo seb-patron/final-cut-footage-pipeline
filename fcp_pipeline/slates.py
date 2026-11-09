@@ -354,10 +354,20 @@ def _starts_with_recognized_part(text: str, vocabulary) -> bool:
     """Whether slate text opens with a genuinely recognized slate part.
 
     Only the first event counts: the part must stand directly after
-    the word "slate". Leftover and Place parts never count, and neither
-    do unmatched stock or camera spellings kept as heard.
+    the word "slate", so only the first piece (up to the first comma,
+    semicolon or full stop) is read. Leftover and Place parts never
+    count, and neither do unmatched stock or camera spellings kept as
+    heard.
     """
-    for kind, payload in _parse_events(text, vocabulary):
+    first = ""
+    for raw_piece in _PIECE_SPLIT_RE.split(text):
+        piece = raw_piece.strip()
+        if piece:
+            first = piece
+            break
+    if not first:
+        return False
+    for kind, payload in _parse_events(first, vocabulary):
         if kind != "part":
             return False
         return (
@@ -553,7 +563,7 @@ def _parse_events(text: str, vocabulary) -> list:
                     )
                 )
             continue
-        day_match = _DAY_RE.search(normalize(piece))
+        day_match = _DAY_RE.match(normalize(piece))
         if day_match is not None:
             token = day_match.group(1)
             if token.isdigit():

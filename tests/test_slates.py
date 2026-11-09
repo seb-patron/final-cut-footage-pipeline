@@ -648,16 +648,22 @@ class TestSlates(unittest.TestCase):
             settings = load_trip(write_trip(tmp))
             with Catalog.in_memory() as catalog:
                 media_ids = load_clips(
-                    catalog, tmp, ["ordinary-word", "ordinary-words"]
+                    catalog,
+                    tmp,
+                    ["ordinary-word", "ordinary-words", "ordinary-word-day"],
                 )
                 result = tag_slates(
                     catalog, settings, vocabulary=camera_vocabulary(catalog, settings)
                 )
                 self.assertEqual(
                     [entry.status for entry in result.entries],
-                    ["no-slate", "no-slate"],
+                    ["no-slate", "no-slate", "no-slate"],
                 )
-                for name in ("ordinary-word", "ordinary-words"):
+                for name in (
+                    "ordinary-word",
+                    "ordinary-words",
+                    "ordinary-word-day",
+                ):
                     with self.subTest(clip=name):
                         self.assertEqual(catalog.list_tags(media_ids[name]), [])
 
