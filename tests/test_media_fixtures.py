@@ -29,6 +29,7 @@ from tests.media_fixtures import (
     make_audio,
     make_card_tree,
     make_clip,
+    make_cut_clip,
     make_still,
 )
 
@@ -240,6 +241,68 @@ class TestMedia(unittest.TestCase):
                 timeout=300)
             self.assertEqual(completed.stdout.decode("utf-8").strip(),
                              "2020:01:02 03:04:05")
+
+    def test_cut_clip_frames_and_colours(self):
+        clip = make_cut_clip((("red", 2), ("blue", 3)))
+        probed = _probe(clip)
+        video = _video_stream(probed)
+        if "nb_frames" in video:
+            self.assertEqual(int(video["nb_frames"]), 50)
+        else:
+            ffprobe = _require_ffprobe()
+            completed = subprocess.run(
+                [ffprobe, "-hide_banner", "-v", "error",
+                 "-select_streams", "v:0", "-count_frames",
+                 "-show_entries", "stream=nb_read_frames",
+                 "-of", "json", str(clip)],
+                check=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=300)
+            counted = json.loads(completed.stdout.decode("utf-8"))
+            self.assertEqual(
+                int(counted["streams"][0]["nb_read_frames"]), 50)
+        self.assertLessEqual(
+            abs(float(probed["format"]["duration"]) - 5), 0.05)
+        self.assertEqual(
+            (int(video["width"]), int(video["height"])), (64, 36))
+        red = self.read_pixel(clip, 1.0)
+        self.assert_dominant(red, "red")
+        blue = self.read_pixel(clip, 3.0)
+        self.assert_dominant(blue, "blue")
+        again = make_cut_clip((("red", 2), ("blue", 3)))
+        self.assertEqual(clip, again)
+        with self.assertRaises(ValueError):
+            make_cut_clip((("red", 0.15),))
+
+    def read_pixel(self, clip, at):
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            raise unittest.SkipTest(
+                media_fixtures.FFMPEG_SKIP_REASON + " but ffmpeg is missing")
+        # NOTE: the crop runs after an explicit rgb24 conversion:
+        # a bare 1x1 crop on a yuv420p frame is refused (chroma
+        # subsampling rounds the 1 px width down to 0), so the same
+        # rgb24 conversion the rawvideo output would do happens first.
+        completed = subprocess.run(
+            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+             "-ss", str(float(at)), "-i", str(clip),
+             "-vf", "format=rgb24,crop=1:1:32:18", "-frames:v", "1",
+             "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=300)
+        self.assertEqual(len(completed.stdout), 3)
+        red, green, blue = completed.stdout
+        return (red, green, blue)
+
+    def assert_dominant(self, pixel, channel):
+        red, green, blue = pixel
+        channels = {"red": red, "green": green, "blue": blue}
+        wanted = channels[channel]
+        for name, value in channels.items():
+            if name == channel:
+                continue
+            self.assertGreaterEqual(
+                wanted - value, 60,
+                "%s %r is not dominantly %s" % (channel, pixel, channel))
 
     def test_same_args_same_path_and_bytes(self):
         first = make_clip(seconds=1, rate="30000/1001", size=(64, 36),

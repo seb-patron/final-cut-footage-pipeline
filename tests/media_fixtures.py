@@ -15,6 +15,10 @@ Generators (all cached, see below):
   within one audio sample on every ffmpeg build. AAC is deliberately
   not used: its encoder priming/padding lengthens the audio stream
   by a build-dependent amount (about one codec frame or more).
+- :func:`make_cut_clip`: a colour-cut clip built from ``lavfi`` ``color``
+  sources joined by the concat filter, so it holds hard cuts that the
+  scene detector reports (unlike :func:`make_clip`, whose test pattern
+  animates every frame and cannot make colour cuts).
 - :func:`make_still`: a single-frame JPEG of a given pixel size, optionally
   stamped with EXIF dates via exiftool.
 - :func:`make_audio`: a 16-bit PCM WAV holding a 440 Hz tone or silence.
@@ -321,6 +325,82 @@ def make_clip(seconds=1, rate="30000/1001", size=(64, 36),
                     size=(width, height), start_timecode=start_timecode,
                     creation_time=creation_time, make=make, model=model,
                     location=location, audio=audio, container=container)
+    return out
+
+
+def make_cut_clip(segments, rate="10/1", size=(64, 36),
+                  container="mov"):
+    """Build (or reuse) a colour-cut clip and return its path.
+
+    ``segments`` is a tuple of ``(colour, seconds)`` pairs, with
+    ``colour`` any name ffmpeg's ``color`` source accepts; every
+    segment's frame count ``seconds x rate`` must be a whole number
+    (:class:`ValueError` otherwise). The clip is built with one ffmpeg
+    run from ``lavfi`` ``color`` sources joined by the concat filter,
+    with no audio, ``libx264`` ultrafast ``yuv420p``, a single thread
+    and the same bitexact flags as :func:`make_clip`, and is cached by
+    its arguments exactly like the other makers. Raises
+    :class:`unittest.SkipTest` naming ffmpeg when it is missing.
+    """
+    _require_ffmpeg()
+    if container not in ("mov", "mp4"):
+        raise ValueError("container must be 'mov' or 'mp4', got %r"
+                         % (container,))
+    if not isinstance(rate, str) or not rate:
+        raise ValueError("rate must be a non-empty string, got %r" % (rate,))
+    width, height = _check_size(tuple(size))
+    parsed = _parse_rate(rate)
+    parts = list(segments)
+    if not parts:
+        raise ValueError("segments must hold at least one (colour, seconds) pair")
+    frames = []
+    for colour, seconds in parts:
+        if not isinstance(colour, str) or not colour:
+            raise ValueError("colour must be a non-empty string, got %r"
+                             % (colour,))
+        try:
+            wanted = Fraction(str(seconds))
+        except (ValueError, ZeroDivisionError) as exc:
+            raise ValueError("seconds must be a positive number, got %r"
+                             % (seconds,)) from exc
+        if wanted <= 0:
+            raise ValueError("seconds must be a positive number, got %r"
+                             % (seconds,))
+        count = wanted * parsed
+        if count.denominator != 1:
+            raise ValueError(
+                "segment %r at rate %r is %s frames, not a whole number"
+                % (seconds, rate, count))
+        frames.append(int(count))
+    key = _cache_key(("cut",
+                      tuple((str(colour), str(seconds))
+                            for colour, seconds in parts),
+                      rate, width, height, container))
+    out = _cache_dir() / ("cut-%s.%s" % (key, container))
+    if not out.exists():
+        ffmpeg, _ = _require_ffmpeg()
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        for (colour, _seconds), count in zip(parts, frames):
+            length = Fraction(count, 1) / parsed
+            if length.denominator == 1:
+                stamp = str(length.numerator)
+            else:
+                stamp = repr(float(length))
+            command += ["-f", "lavfi", "-i",
+                        "color=c=%s:s=%dx%d:r=%s:d=%s"
+                        % (colour, width, height, rate, stamp)]
+        labels = "".join("[%d:v]" % at for at in range(len(parts)))
+        command += ["-filter_complex",
+                    "%sconcat=n=%d:v=1:a=0[out]" % (labels, len(parts)),
+                    "-map", "[out]",
+                    "-frames:v", str(sum(frames)),
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-threads", "1", "-pix_fmt", "yuv420p",
+                    "-fflags", "+bitexact", "-flags:v", "+bitexact",
+                    "-an", "-movflags", "use_metadata_tags", str(out)]
+        subprocess.run(command, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                       timeout=300)
     return out
 
 
