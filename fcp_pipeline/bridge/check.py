@@ -13,7 +13,9 @@ scripts Final Cut Pro or Motion, imports nothing, writes nothing, and
 uses no network (``xmllint`` runs with ``--nonet`` and gets the
 already-read bytes on stdin). When the DTD folder, the version's DTD
 file, or ``xmllint`` is missing, the result is "cannot verify", never
-"valid".
+"valid". A file whose ``version`` is not exactly one of 1.0 to 1.14 is
+also "cannot verify": only those known versions map to a DTD, and every
+other declared value is reported with a reason without converting it.
 """
 
 import argparse
@@ -43,7 +45,7 @@ DEFAULT_DTD_DIR = (
 
 _XMLLINT_TIMEOUT_SECONDS = 60
 
-_VERSION_RE = re.compile(r"\d+\.\d+")
+_KNOWN_VERSIONS = frozenset("1.%d" % minor for minor in range(15))
 _VALIDITY_RE = re.compile(r"^-:(\d+): element (\S+): validity error : ?(.*)$")
 
 
@@ -114,19 +116,23 @@ def _missing_media_entry(src):
     return decoded
 
 
-def _version_parts(version):
-    """Split a well-formed ``digits.digits`` version into ints."""
-    major, _, minor = version.partition(".")
-    return int(major), int(minor)
+def _dtd_filename(version):
+    """Return the DTD filename for a known ``1.<minor>`` version.
+
+    Callers must check ``version in _KNOWN_VERSIONS`` first; this helper
+    never converts the version to ``int``.
+    """
+    return "FCPXMLv1_%s.dtd" % version.split(".")[1]
 
 
 def check_fcpxml(path, *, dtd_dir=None, dtd_path=None, check_media=True):
     """Check one ``.fcpxml`` file or ``.fcpxmld`` folder, read-only.
 
     ``dtd_dir`` None means :func:`dtd_folder`. ``dtd_path``, when given,
-    names the one DTD file to validate against whatever the file's
-    version. Returns a :class:`CheckResult`; never raises for anything
-    about the file's content or the machine.
+    names the one DTD file to validate against, but only when the file's
+    version is a known one (exactly 1.0 to 1.14). Returns a
+    :class:`CheckResult`; never raises for anything about the file's
+    content or the machine.
     """
     problems: list = []
     missing_media: list = []
@@ -174,34 +180,22 @@ def check_fcpxml(path, *, dtd_dir=None, dtd_path=None, check_media=True):
         )
 
     raw_version = root.get("version")
-    version_valid = (
-        isinstance(raw_version, str)
-        and _VERSION_RE.fullmatch(raw_version) is not None
+    version_known = (
+        isinstance(raw_version, str) and raw_version in _KNOWN_VERSIONS
     )
-    in_range = False
-    if not version_valid:
-        if raw_version is None:
-            problems.append(
-                Problem(message="missing version attribute on fcpxml root")
-            )
-        else:
-            problems.append(
-                Problem(
-                    message="malformed version %r; expected digits.digits "
-                    "like 1.14" % (raw_version,)
-                )
-            )
-    else:
+    if version_known:
         version = raw_version
-        major, minor = _version_parts(version)
-        in_range = major == 1 and 0 <= minor <= 14
-        if dtd_path is None and not in_range:
-            problems.append(
-                Problem(
-                    message="unsupported FCPXML version %s; supported "
-                    "versions are 1.0 to 1.14" % (version,)
-                )
+    elif raw_version is None:
+        problems.append(
+            Problem(message="missing version attribute on fcpxml root")
+        )
+    else:
+        problems.append(
+            Problem(
+                message="unsupported FCPXML version %r; supported "
+                "versions are 1.0 to 1.14" % (raw_version,)
             )
+        )
 
     for element in root.iter("event"):
         name = element.get("name")
@@ -223,12 +217,14 @@ def check_fcpxml(path, *, dtd_dir=None, dtd_path=None, check_media=True):
             if entry is not None and entry not in missing_media:
                 missing_media.append(entry)
 
-    invalid = not version_valid or bool(missing_media)
-    cannot_verify = dtd_path is None and version_valid and not in_range
+    invalid = bool(missing_media)
+    cannot_verify = not version_known
 
     dtd = Path(dtd_path) if dtd_path is not None else None
     dtd_file = None
-    if dtd is not None:
+    if not version_known:
+        pass
+    elif dtd is not None:
         if not dtd.is_file():
             problems.append(
                 Problem(message="DTD file not found: %s" % (dtd,))
@@ -243,10 +239,9 @@ def check_fcpxml(path, *, dtd_dir=None, dtd_path=None, check_media=True):
             cannot_verify = True
         else:
             dtd_file = dtd
-    elif version_valid and in_range:
+    else:
         folder = Path(dtd_dir) if dtd_dir is not None else dtd_folder()
-        _, minor = _version_parts(version)
-        dtd = folder / ("FCPXMLv1_%d.dtd" % minor)
+        dtd = folder / _dtd_filename(version)
         if not folder.is_dir():
             problems.append(
                 Problem(message="DTD folder not found: %s" % (folder,))

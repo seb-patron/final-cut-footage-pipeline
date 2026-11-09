@@ -12,7 +12,8 @@ case it reads the `Info.fcpxml` inside). It then:
   those bytes, so you can tell whether the file changed;
 - checks the file against the description of the format that ships
   inside the installed Final Cut, for the file's own version (versions
-  1.0 to 1.14 each have their own description);
+  1.0 to 1.14 each have their own description; any other version is
+  reported without comparing);
 - checks that every media file the timeline points to actually exists
   on disk (it never opens or plays them, it only looks for them);
 - lists the names of the events and projects it finds.
@@ -24,13 +25,17 @@ The first line printed is always one of four words:
 - `valid`: the file was read, every media file exists, and the
   installed description accepts it.
 - `invalid`: something is wrong (the file cannot be read, it is
-  malformed, its version is bad, a media file is missing, or the
-  description rejects it). The lines after say what.
+  malformed, a media file is missing, or the description rejects it).
+  The lines after say what.
 - `refused`: the file was set aside as unsafe before anything else
   happened, and nothing further was done with it.
 - `cannot verify`: the check could not run to a verdict, because the
+  file's version is not exactly one of 1.0 to 1.14, or because the
   folder with the descriptions, the description for the file's version,
-  or the `xmllint` tool is missing.
+  or the `xmllint` tool is missing. Any other declared version (empty,
+  non-numeric, extra components, leading zeros, absurdly long digits,
+  surrounding whitespace, or a missing attribute) is reported with a
+  reason and never mapped to a description.
 
 "Cannot verify" is not a pass. It means the answer is unknown, not
 that the file is fine.
@@ -60,8 +65,8 @@ projects, missing media, and one line per problem found.
 It never opens, launches or scripts Final Cut Pro or Motion. It never
 imports anything, writes anything, or uses the network. It reads the
 one file you name (and, through `xmllint`, the one description file
-for its version), checks named media paths for existence only, and
-reports.
+for its version when the version is one of 1.0 to 1.14), checks named
+media paths for existence only, and reports.
 
 Apple's descriptions are never copied into this repository. A `bridge
 check` step of the pipeline command, and having the export step use

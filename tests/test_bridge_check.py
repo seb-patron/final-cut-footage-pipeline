@@ -297,6 +297,67 @@ class TestCheck(unittest.TestCase):
                 self.assertEqual(result.status, VALID)
                 self.assertEqual(result.dtd.name, "FCPXMLv1_10.dtd")
 
+    def test_unknown_versions_never_raise_and_cannot_verify(self):
+        big = "1." + "7" * 5000
+        cases = (
+            ("long-digits", big),
+            ("non-numeric", "1.x"),
+            ("out-of-range", "2.0"),
+            ("extra-component", "1.14.1"),
+            ("empty", ""),
+            ("whitespace", " 1.14"),
+            ("leading-zero", "01.14"),
+        )
+        for label, declared in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    doc = Path(tmp) / ("unknown-%s.fcpxml" % label)
+                    doc.write_text(
+                        MINIMAL_TEMPLATE.format(version=declared),
+                        encoding="utf-8",
+                    )
+                    with mock.patch(
+                        "subprocess.run",
+                        side_effect=AssertionError(
+                            "subprocess must not run"),
+                    ):
+                        result = check_fcpxml(str(doc))
+                    self.assertEqual(result.status, CANNOT_VERIFY)
+                    self.assertFalse(result.ok)
+                    self.assertIsNone(result.version)
+                    self.assertIsNone(result.dtd)
+                    self.assertEqual(result.missing_media, [])
+                    self.assertTrue(result.problems, result.problems)
+                    self.assertTrue(
+                        any("unsupported FCPXML version" in problem.message
+                            for problem in result.problems),
+                        result.problems,
+                    )
+        with self.subTest(label="missing"):
+            with tempfile.TemporaryDirectory() as tmp:
+                doc = Path(tmp) / "unknown-missing.fcpxml"
+                doc.write_text(
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    "<!DOCTYPE fcpxml>\n"
+                    "<fcpxml/>\n",
+                    encoding="utf-8",
+                )
+                with mock.patch(
+                    "subprocess.run",
+                    side_effect=AssertionError("subprocess must not run"),
+                ):
+                    result = check_fcpxml(str(doc))
+                self.assertEqual(result.status, CANNOT_VERIFY)
+                self.assertFalse(result.ok)
+                self.assertIsNone(result.version)
+                self.assertIsNone(result.dtd)
+                self.assertEqual(result.missing_media, [])
+                self.assertTrue(
+                    any("missing version attribute" in problem.message
+                        for problem in result.problems),
+                    result.problems,
+                )
+
     def test_hash_stable(self):
         with tempfile.TemporaryDirectory() as tmp:
             payload = (
