@@ -1,0 +1,15 @@
+title = "Emberline Survey"
+
+[final_cut]
+library = "media/Emberline.fcpbundle"
+events = ["Emberline Gathering"]
+
+[media]
+footage = ["media/footage"]
+photos = ["media/photos"]
+assets = "media/assets"
+
+[pipeline]
+timezone = "UTC"
+start_date = 2020-01-15
+offline = true
