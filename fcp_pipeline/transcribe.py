@@ -477,8 +477,6 @@ def transcribe_catalog(
                         path=path, status="transcribed", files=tuple(written)
                     )
                 )
-            except TranscribeError:
-                raise
             except Exception as exc:
                 entries.append(
                     TranscribeEntry(

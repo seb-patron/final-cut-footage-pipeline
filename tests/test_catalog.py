@@ -32,6 +32,13 @@ from fcp_pipeline.trip import load_trip
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "fcp_pipeline" / "schema.sql"
+SCHEMA_V2_PATH = ROOT / "tests" / "fixtures" / "catalog" / "schema-v2.sql"
+#: SHA-256 of ``fcp_pipeline/schema.sql`` at commit 22def48 (the merged
+#: v2 schema). The migration test builds its v2 database from that
+#: pinned fixture, never from the candidate schema.
+SCHEMA_V2_SHA256 = (
+    "c87efad37a3e172282f0f3952f54d33da0f3a2459d626b176b7662dce140fc53"
+)
 FIXTURE_PATH = ROOT / "tests" / "fixtures" / "templates" / "assets.tsv"
 
 
@@ -262,13 +269,13 @@ class TestCatalog(unittest.TestCase):
             pipeline = places["project"] / ".pipeline"
             pipeline.mkdir()
             db_path = pipeline / "catalog.sqlite"
-            schema = SCHEMA_PATH.read_text(encoding="utf-8")
-            v2 = [
-                s
-                for s in split_statements(schema)
-                if "transcript_segments" not in s.lower()
-                and "transcript_words" not in s.lower()
-            ]
+            v2_text = SCHEMA_V2_PATH.read_text(encoding="utf-8")
+            self.assertEqual(
+                hashlib.sha256(v2_text.encode("utf-8")).hexdigest(),
+                SCHEMA_V2_SHA256,
+            )
+            v2 = split_statements(v2_text)
+            self.assertTrue(v2)
             self.assertTrue(
                 all("transcript_segments" not in s.lower() for s in v2)
             )
@@ -308,6 +315,22 @@ class TestCatalog(unittest.TestCase):
                     "INSERT INTO schema_version (version) VALUES (2)"
                 )
                 connection.commit()
+                before_master = connection.execute(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                    "ORDER BY name"
+                ).fetchall()
+                before_info = {}
+                before_rows = {}
+                for (table,) in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "ORDER BY name"
+                ).fetchall():
+                    before_info[table] = connection.execute(
+                        f"PRAGMA table_info({table})"
+                    ).fetchall()
+                    before_rows[table] = connection.execute(
+                        f'SELECT * FROM "{table}" ORDER BY rowid'
+                    ).fetchall()
             finally:
                 connection.close()
             with Catalog.open(settings) as catalog:
@@ -323,6 +346,47 @@ class TestCatalog(unittest.TestCase):
                     [("transcripts/clip-a.json", "en")],
                 )
                 migrated = dump_schema(catalog._connection)
+                after_master = {
+                    row[1]: tuple(row)
+                    for row in migrated[0]
+                }
+                for row in before_master:
+                    self.assertIn(row[1], after_master)
+                    self.assertEqual(after_master[row[1]], tuple(row))
+                self.assertEqual(
+                    {
+                        name
+                        for name, row in after_master.items()
+                        if row[0] == "table"
+                    }
+                    - {row[1] for row in before_master},
+                    {"transcript_segments", "transcript_words"},
+                )
+                for table, columns in before_info.items():
+                    self.assertIn(table, migrated[1])
+                    self.assertEqual(
+                        [tuple(row) for row in migrated[1][table]],
+                        [tuple(row) for row in columns],
+                    )
+                for table, rows in before_rows.items():
+                    if table == "schema_version":
+                        continue
+                    self.assertEqual(
+                        [
+                            tuple(row)
+                            for row in catalog._connection.execute(
+                                f'SELECT * FROM "{table}" ORDER BY rowid'
+                            ).fetchall()
+                        ],
+                        [tuple(row) for row in rows],
+                    )
+                version_rows = [
+                    tuple(row)
+                    for row in catalog._connection.execute(
+                        "SELECT version FROM schema_version"
+                    ).fetchall()
+                ]
+                self.assertEqual(version_rows, [(SCHEMA_VERSION,)])
             with Catalog.in_memory() as fresh_memory:
                 memory_schema = dump_schema(fresh_memory._connection)
             with tempfile.TemporaryDirectory() as raw2:
@@ -486,6 +550,167 @@ class TestCatalog(unittest.TestCase):
                     )
                 self.assertEqual(counts(), (0, 0, 0))
                 self.assertEqual(catalog.list_transcripts(media_id), [])
+
+    def test_transcript_set_rolls_back_unexpected_errors(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, places = self.make_project(tmp)
+            media_path = places["footage"] / "clip-a.mov"
+            with Catalog.open(settings) as catalog:
+                media_id = catalog.put_media(self.full_media(media_path))
+
+                def counts():
+                    connection = catalog._connection
+                    return tuple(
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM {table}"
+                        ).fetchone()[0]
+                        for table in (
+                            "transcripts",
+                            "transcript_segments",
+                            "transcript_words",
+                        )
+                    )
+
+                segments = [
+                    TranscriptSegmentRecord(
+                        idx=0,
+                        start=Fraction(0, 1),
+                        stop=Fraction(5, 2),
+                        text="invented words",
+                        words=[
+                            TranscriptWordRecord(
+                                idx=0,
+                                start=Fraction(0, 1),
+                                stop=Fraction(2, 5),
+                                word="invented",
+                                probability=None,
+                            ),
+                            TranscriptWordRecord(
+                                idx=1,
+                                start=Fraction(1, 2),
+                                stop=Fraction(9, 10),
+                                word="words",
+                                probability=0.8,
+                            ),
+                        ],
+                    )
+                ]
+                files = [
+                    ("transcripts/clip-a.json", "ab" * 32),
+                    ("transcripts/clip-a.srt", "cd" * 32),
+                    ("transcripts/clip-a.txt", "ef" * 32),
+                ]
+                with mock.patch.object(
+                    catalog,
+                    "_check_range",
+                    side_effect=[
+                        None,
+                        RuntimeError("invented insert failure"),
+                    ],
+                ):
+                    with self.assertRaises(RuntimeError):
+                        catalog.add_transcript_set(
+                            media_id,
+                            files=list(files),
+                            language="en",
+                            engine="invented-engine",
+                            created="2020-06-15T08:30:00Z",
+                            segments=segments,
+                        )
+                self.assertEqual(counts(), (0, 0, 0))
+                self.assertEqual(catalog.list_transcripts(media_id), [])
+                self.assertFalse(catalog._connection.in_transaction)
+                again = catalog.add_transcript_set(
+                    media_id,
+                    files=list(files),
+                    language="en",
+                    engine="invented-engine",
+                    created="2020-06-15T08:30:00Z",
+                    segments=segments,
+                )
+                self.assertEqual(len(again), 3)
+                self.assertEqual(counts(), (3, 1, 2))
+                self.assertFalse(catalog._connection.in_transaction)
+
+    def test_transcript_set_rolls_back_keyboard_interrupt(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, places = self.make_project(tmp)
+            media_path = places["footage"] / "clip-a.mov"
+            with Catalog.open(settings) as catalog:
+                media_id = catalog.put_media(self.full_media(media_path))
+
+                def counts():
+                    connection = catalog._connection
+                    return tuple(
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM {table}"
+                        ).fetchone()[0]
+                        for table in (
+                            "transcripts",
+                            "transcript_segments",
+                            "transcript_words",
+                        )
+                    )
+
+                segments = [
+                    TranscriptSegmentRecord(
+                        idx=0,
+                        start=Fraction(0, 1),
+                        stop=Fraction(5, 2),
+                        text="invented words",
+                        words=[
+                            TranscriptWordRecord(
+                                idx=0,
+                                start=Fraction(0, 1),
+                                stop=Fraction(2, 5),
+                                word="invented",
+                                probability=None,
+                            ),
+                            TranscriptWordRecord(
+                                idx=1,
+                                start=Fraction(1, 2),
+                                stop=Fraction(9, 10),
+                                word="words",
+                                probability=0.8,
+                            ),
+                        ],
+                    )
+                ]
+                files = [
+                    ("transcripts/clip-a.json", "ab" * 32),
+                    ("transcripts/clip-a.srt", "cd" * 32),
+                    ("transcripts/clip-a.txt", "ef" * 32),
+                ]
+                with mock.patch.object(
+                    catalog,
+                    "_check_range",
+                    side_effect=[None, KeyboardInterrupt("invented")],
+                ):
+                    with self.assertRaises(KeyboardInterrupt):
+                        catalog.add_transcript_set(
+                            media_id,
+                            files=list(files),
+                            language="en",
+                            engine="invented-engine",
+                            created="2020-06-15T08:30:00Z",
+                            segments=segments,
+                        )
+                self.assertEqual(counts(), (0, 0, 0))
+                self.assertEqual(catalog.list_transcripts(media_id), [])
+                self.assertFalse(catalog._connection.in_transaction)
+                again = catalog.add_transcript_set(
+                    media_id,
+                    files=list(files),
+                    language="en",
+                    engine="invented-engine",
+                    created="2020-06-15T08:30:00Z",
+                    segments=segments,
+                )
+                self.assertEqual(len(again), 3)
+                self.assertEqual(counts(), (3, 1, 2))
+                self.assertFalse(catalog._connection.in_transaction)
 
     def test_refuses_newer_schema(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -948,6 +948,119 @@ class TestTranscribe(unittest.TestCase):
                 names = sorted(os.listdir(project / "transcripts"))
                 self.assertEqual(len(names), 3)
 
+    def test_backend_transcribe_error_fails_the_clip(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings, places = self.make_project(tmp)
+            footage = places["footage"]
+            project = places["project"]
+            with Catalog.open(settings) as catalog:
+                first, first_id = self.add_placeholder(
+                    catalog, footage, "clip-a.mov", "asset-a"
+                )
+                second, second_id = self.add_placeholder(
+                    catalog, footage, "clip-b.mov", "asset-b"
+                )
+
+                class UnluckyBackend(FakeBackend):
+                    def __call__(self, path, *, model, initial_prompt):
+                        self.calls.append(
+                            {
+                                "path": path,
+                                "model": model,
+                                "initial_prompt": initial_prompt,
+                            }
+                        )
+                        if len(self.calls) == 1:
+                            raise TranscribeError(
+                                "invented transcribe failure"
+                            )
+                        return self.answer
+
+                unlucky = UnluckyBackend()
+                result = transcribe_catalog(
+                    catalog,
+                    settings,
+                    backend=unlucky,
+                    audio_probe=lambda path: True,
+                )
+                self.assertEqual(len(unlucky.calls), 2)
+                by_path = {entry.path: entry for entry in result.entries}
+                failed = by_path[os.path.abspath(first)]
+                self.assertEqual(failed.status, "failed")
+                self.assertIn(
+                    "invented transcribe failure", failed.reason or ""
+                )
+                self.assertEqual(failed.files, ())
+                self.assertEqual(catalog.list_transcripts(first_id), [])
+                good = by_path[os.path.abspath(second)]
+                self.assertEqual(good.status, "transcribed")
+                self.assertEqual(len(good.files), 3)
+                self.assertEqual(len(catalog.list_transcripts(second_id)), 3)
+                self.assertEqual(
+                    result.outcome,
+                    "transcribed 1, skipped 0, no-audio 0, "
+                    "stale 0, failed 1",
+                )
+                names = sorted(os.listdir(project / "transcripts"))
+                self.assertEqual(len(names), 3)
+        with self.subTest("main reports failed clips with exit 0"):
+            with tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                settings, places = self.make_project(tmp)
+                footage = places["footage"]
+                project = places["project"]
+                with Catalog.open(settings) as catalog:
+                    self.add_placeholder(
+                        catalog, footage, "clip-a.mov", "asset-a"
+                    )
+                    self.add_placeholder(
+                        catalog, footage, "clip-b.mov", "asset-b"
+                    )
+
+                class UnluckyBackend(FakeBackend):
+                    def __call__(self, path, *, model, initial_prompt):
+                        self.calls.append(
+                            {
+                                "path": path,
+                                "model": model,
+                                "initial_prompt": initial_prompt,
+                            }
+                        )
+                        if len(self.calls) == 1:
+                            raise TranscribeError(
+                                "invented transcribe failure"
+                            )
+                        return self.answer
+
+                unlucky = UnluckyBackend()
+                out, errors = io.StringIO(), io.StringIO()
+                with mock.patch.object(
+                    whisper_local, "available", return_value=True
+                ), mock.patch.object(
+                    transcribe_module, "clip_has_audio", return_value=True
+                ), mock.patch.object(
+                    whisper_local, "transcribe_file", unlucky
+                ), contextlib.redirect_stdout(
+                    out
+                ), contextlib.redirect_stderr(errors):
+                    code = main(["--trip", os.fspath(project)])
+                self.assertEqual(code, 0)
+                lines = out.getvalue().splitlines()
+                self.assertTrue(
+                    any(
+                        line.startswith("failed: ")
+                        and "invented transcribe failure" in line
+                        for line in lines
+                    ),
+                    out.getvalue(),
+                )
+                self.assertEqual(
+                    lines[-1],
+                    "transcribed 1, skipped 0, no-audio 0, "
+                    "stale 0, failed 1",
+                )
+
     def test_stale_clip_is_left_alone(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)

@@ -1235,7 +1235,7 @@ class Catalog:
             raise CatalogError(
                 f"bad transcript set for media {media_id}: {exc}"
             ) from None
-        except Exception:
+        except BaseException:
             connection.rollback()
             raise
 
