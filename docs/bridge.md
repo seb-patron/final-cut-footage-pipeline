@@ -1,7 +1,9 @@
-# Offline FCPXML check
+# Offline check and export watcher
 
 The offline check looks at one exported timeline file and tells you
-whether it is sound, without ever opening Final Cut.
+whether it is sound, without ever opening Final Cut. The export
+watcher sits on the folder you export into and hands you the next new
+export once it has finished landing.
 
 ## What it does
 
@@ -71,3 +73,63 @@ media paths for existence only, and reports.
 Apple's descriptions are never copied into this repository. A `bridge
 check` step of the pipeline command, and having the export step use
 this check as its own proofreading, both come later.
+
+## Watching the export folder for a new file
+
+The tool cannot ask Final Cut to export anything, so you export the
+timeline XML by hand into a folder. The watcher watches that one
+folder and tells you when the next new export has landed.
+
+Start the watcher on the folder first, then export under a new name:
+files already in the folder when the watcher starts are ignored, even
+when they are replaced later. So every export you want noticed needs a
+name the folder has never held while the watcher was running.
+
+A new file is reported only once it has stopped changing. For a
+bundle, the watcher waits until the `Info.fcpxml` inside it is there
+and the bundle has stopped changing. It then runs the offline check
+described above on the new export and prints, in this order:
+
+- `found:` followed by the path of the new file or bundle;
+- `sha256:` followed by the fingerprint of exactly the bytes the check
+  read (the `Info.fcpxml` bytes for a bundle), or `unknown` when the
+  check could not read them;
+- `check:` followed by the check's answer word, then one indented line
+  per problem the check found, with its line and element when known.
+
+## Running the watcher
+
+```
+python3 -m fcp_pipeline.bridge.watch --folder <folder> [--timeout SECONDS] [--interval SECONDS] [--settle SECONDS]
+```
+
+The options default to 600 seconds of waiting, polling every 1.0
+seconds, and requiring a file to stand still for 2.0 seconds before it
+counts as finished. Each option must be a number above 0.
+
+The exit code is 0 when every new export found is valid, 1 when any is
+invalid or refused, and 4 when the answer is cannot verify, the same
+codes the check itself uses. When nothing new arrives in time, it
+prints one line saying so and exits 3. A missing folder option, a
+folder that does not exist or is not a folder, or a bad number is a
+usage error with exit code 2.
+
+## What the watcher writes (and never does)
+
+It only looks inside the watched folder: it never creates, modifies,
+renames or deletes any file or folder there, and no new files appear
+there while it runs. Outside the watched folder it writes nothing
+except Python bytecode caches (`__pycache__/*.pyc`) — in particular
+nothing under `.pipeline/` either — and even those go away when run
+with `python3 -B` or `PYTHONDONTWRITEBYTECODE=1` (the command also sets
+`sys.dont_write_bytecode` before importing package modules). It never
+opens, launches or scripts Final Cut Pro or Motion, and uses no network.
+It reads the watched folder's top-level listing to spot new names, opens
+each new `.fcpxml` file (or bundle's `Info.fcpxml`) with `O_NOFOLLOW`
+(and `O_NONBLOCK`, then `fstat` `S_ISREG`) relative to a directory fd for
+the watched folder, validates exactly those bytes through the offline
+check without re-opening the candidate path, and otherwise only prints
+to the screen.
+
+A `bridge watch` step of the pipeline command, which will run this
+watcher for you, comes later.
