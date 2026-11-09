@@ -108,12 +108,11 @@ What it holds: two top-level projects built from the export's own
 browser clips, with no library and no events. Check rough cut plays
 each browser clip back to back from zero. Check section selects plays
 a shorter inner range of each clip back to back from zero. Every section
-select is non-empty and strictly shorter than its source clip. When clips
-use different frame rates, each section select is cut on its clip's own
-frame grid and then aligned down to the first clip's sequence grid, and any
-export where a clip is too short to leave a non-empty strictly-shorter
-select on both grids is refused with a clear error instead. Exports
-with any browser video clip of two source frames or fewer are refused
+select is non-empty and strictly shorter than its source clip: its offset
+and duration sit on the first clip's sequence grid while its start sits
+on its own clip's grid, so the source end (start plus duration) need not
+land on a clip frame. Any export with a clip too short for such a select,
+including any browser video clip of two source frames or fewer, is refused
 with a clear error instead. Resources carry over only the used assets
 and formats.
 

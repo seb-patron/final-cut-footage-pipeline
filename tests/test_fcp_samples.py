@@ -556,7 +556,7 @@ class TestSamples(unittest.TestCase):
             '<library><event name="Mixed event">%s</event></library></fcpxml>'
             % ("".join(formats), assets, browser)).encode("utf-8")
 
-    def test_mixed_rate_selects_align_to_both_grids(self):
+    def test_mixed_rate_selects_follow_fcpxml_timing(self):
         from tests import fcp_samples
 
         first = ("a1", "f1", "First 25 fps clip", "0s", "1s", "1/25s")
@@ -597,6 +597,12 @@ class TestSamples(unittest.TestCase):
                 self.assertGreaterEqual(sstart, rstart)
                 self.assertLessEqual(sstart + sdur, rstart + rdur)
                 self.assertLessEqual(sstart + sdur, source)
+        film_select = next(c for c in selects if c.get("ref") == "a3")
+        film_dur = _parse_time(film_select.get("duration"))
+        self.assertEqual(film_dur % seq_fd, 0)
+        # The timeline duration lives on the sequence grid only: 123/25s is
+        # 147600/1001 film frames, so it need not land on the clip grid.
+        self.assertNotEqual(film_dur % clip_fds["a3"], 0)
         probe = self._mixed_export_bytes([
             first,
             ("a2", "f2", "Three frame fast clip", "0s", "3/100s", "1/100s"),
@@ -604,7 +610,7 @@ class TestSamples(unittest.TestCase):
         ])
         with self.assertRaises(ValueError) as raised:
             fcp_samples.build_from_export(probe)
-        self.assertIn("both frame grids", str(raised.exception))
+        self.assertIn("sequence grid", str(raised.exception))
         work = self.tmp / "mixed-rate-probe.fcpxml"
         work.write_bytes(probe)
         out = self.tmp / "mixed-rate-probe-run"

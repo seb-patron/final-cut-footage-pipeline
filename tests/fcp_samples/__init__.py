@@ -654,11 +654,13 @@ def _annotate_first_clips(root):
 
 
 def _select_duration(start, duration, clip_fd, seq_fd, rough_dur):
-    """Return the section-select duration, or None when the grids cannot fit it.
+    """Return the section-select duration, or None when the clip is too short.
 
-    The source range gives up one clip frame at each end and the
-    timeline duration is aligned down to the sequence grid; the result
-    must stay non-empty and strictly shorter than the rough duration.
+    The select start stays one clip frame inside the source, on the clip
+    grid; the offset and duration are timeline values on the sequence
+    grid, so the source end (start + duration) need not land on a clip
+    frame. The result must stay non-empty and strictly shorter than the
+    rough duration.
     """
     remainder = duration - 2 * clip_fd
     if remainder <= 0:
@@ -689,11 +691,11 @@ def _short_clip_reason(clips):
         if _select_duration(info["start"], info["duration"],
                             info["frame_dur"], seq_fd, rough_dur) is None:
             return (
-                "clip %r cannot fit a section select on both frame grids "
+                "clip %r cannot fit a section select on the sequence grid "
                 "(duration %s at frame duration %s with sequence frame "
                 "duration %s); section selects need a non-empty range "
-                "strictly shorter than the source on both the clip and "
-                "sequence grids"
+                "strictly shorter than the source with the start on the "
+                "clip grid and the offset and duration on the sequence grid"
                 % (info["name"], _fmt_time(info["duration"]),
                    _fmt_time(info["frame_dur"]), _fmt_time(seq_fd))
             )
