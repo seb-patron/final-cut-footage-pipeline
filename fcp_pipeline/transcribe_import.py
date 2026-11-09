@@ -46,6 +46,11 @@ ENGINE_NAME = "mlx-whisper:imported"
 #: A result file larger than this is reported without being read fully.
 MAX_RESULT_BYTES = 20_000_000
 
+#: A result number larger than this in absolute value is refused as a
+#: format error before any float conversion, so an oversized integer
+#: can never reach ``float()`` and abort the import.
+MAX_SECONDS = 1_000_000
+
 #: Wrapped batch-result statuses that count as a finished success.
 _SUCCESS_STATUSES = frozenset(
     {
@@ -134,19 +139,31 @@ def _utcnow() -> str:
 def _parse_time(value: object, *, name: str) -> Fraction:
     """Turn a JSON seconds value into an exact :class:`Fraction`.
 
-    Accepts finite ints and floats (booleans are refused); NaN and
-    Infinity are refused. Anything else raises :class:`ResultFormatError`
-    naming ``name`` and the rule.
+    Accepts finite ints and floats (booleans are refused) whose
+    absolute value fits within ``MAX_SECONDS`` and which are at or
+    above 0; out-of-bounds values, negatives, NaN and Infinity are
+    refused. Anything else raises :class:`ResultFormatError` naming
+    ``name`` and the rule. The bound is checked before any float
+    conversion so an oversized integer never reaches ``float()``.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ResultFormatError(
             f"bad {name}: must be a finite number of seconds, "
             "never a bool, NaN or Infinity"
         )
+    if abs(value) > MAX_SECONDS:
+        raise ResultFormatError(
+            f"bad {name}: must be a finite number of seconds "
+            f"within {MAX_SECONDS} seconds in absolute value"
+        )
     if not math.isfinite(float(value)):
         raise ResultFormatError(
             f"bad {name}: must be a finite number of seconds, "
             "never a bool, NaN or Infinity"
+        )
+    if value < 0:
+        raise ResultFormatError(
+            f"bad {name}: must be a number of seconds at or above 0"
         )
     return whisper_local._to_fraction(value)
 
@@ -180,17 +197,25 @@ def _parse_word(raw: object, *, segment_label: str, index: int) -> whisper_local
     stop = _parse_time(raw.get("end"), name=f"{label}.end")
     probability = raw.get("probability")
     if probability is not None:
-        if (
-            isinstance(probability, bool)
-            or not isinstance(probability, (int, float))
-            or not math.isfinite(float(probability))
-            or not 0 <= float(probability) <= 1
+        if isinstance(probability, bool) or not isinstance(
+            probability, (int, float)
         ):
             raise ResultFormatError(
                 f"bad {label}.probability: must be None or a number "
                 "from 0 to 1"
             )
-        probability = float(probability)
+        if abs(probability) > MAX_SECONDS:
+            raise ResultFormatError(
+                f"bad {label}.probability: must be None or a number "
+                "from 0 to 1"
+            )
+        as_float = float(probability)
+        if not math.isfinite(as_float) or not 0 <= as_float <= 1:
+            raise ResultFormatError(
+                f"bad {label}.probability: must be None or a number "
+                "from 0 to 1"
+            )
+        probability = as_float
     return whisper_local.Word(
         start=start, stop=stop, word=word_text, probability=probability
     )

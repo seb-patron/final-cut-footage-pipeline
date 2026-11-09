@@ -787,6 +787,109 @@ class TestImport(unittest.TestCase):
                 self.assertEqual(catalog.list_transcripts(media_id), [])
                 self.assertFalse((project / "transcripts").exists())
 
+    def test_bounded_numbers_unmatched(self):
+        huge = int("9" * 400)
+        cases = [
+            (
+                "huge-start",
+                {
+                    "language": "en",
+                    "duration": 2.5,
+                    "segments": [
+                        {
+                            "start": huge,
+                            "end": 2.5,
+                            "text": "invented bad start",
+                        }
+                    ],
+                },
+                "start",
+            ),
+            (
+                "huge-asset-duration",
+                {
+                    "language": "en",
+                    "segments": [
+                        {
+                            "start": 0.0,
+                            "end": 2.5,
+                            "text": "invented bad duration",
+                        }
+                    ],
+                    "asset": {"duration_seconds": huge},
+                },
+                "asset.duration_seconds",
+            ),
+            (
+                "neg-huge",
+                {
+                    "language": "en",
+                    "duration": 2.5,
+                    "segments": [
+                        {
+                            "start": -1e308,
+                            "end": 2.5,
+                            "text": "invented bad start",
+                        }
+                    ],
+                },
+                "start",
+            ),
+            (
+                "bool-time",
+                {
+                    "language": "en",
+                    "duration": 2.5,
+                    "segments": [
+                        {
+                            "start": True,
+                            "end": 2.5,
+                            "text": "invented bad start",
+                        }
+                    ],
+                },
+                "start",
+            ),
+        ]
+        for label, bad_data, key in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as raw:
+                    tmp = Path(raw)
+                    settings, places = self.make_project(tmp)
+                    footage, _project, results = (
+                        places["footage"],
+                        places["project"],
+                        places["results"],
+                    )
+                    with Catalog.open(settings) as catalog:
+                        _, good_id = self.add_clip(
+                            catalog, footage, "good.mov", "asset-good"
+                        )
+                        self.add_clip(
+                            catalog, footage, "bad.mov", "asset-bad"
+                        )
+                        self.add_fixture_result(
+                            results, "good.json", "harbor-a.json"
+                        )
+                        self.add_result(results, "bad.json", bad_data)
+                        result = import_results(
+                            catalog, settings, results
+                        )
+                        by_name = {
+                            entry.name: entry for entry in result.entries
+                        }
+                        self.assertEqual(result.imported, 1)
+                        self.assertEqual(result.unmatched, 1)
+                        self.assertEqual(
+                            by_name["good.json"].status, "imported"
+                        )
+                        bad_entry = by_name["bad.json"]
+                        self.assertEqual(bad_entry.status, "unmatched")
+                        self.assertIn(key, bad_entry.reason or "")
+                        self.assertEqual(
+                            len(catalog.list_transcripts(good_id)), 3
+                        )
+
     def test_main_exit_codes(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
