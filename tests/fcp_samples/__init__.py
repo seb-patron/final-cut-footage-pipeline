@@ -13,6 +13,7 @@ used, so the module works on macOS and Linux with Python 3.11.
 
 import argparse
 import copy
+import json
 import os
 import shutil
 import sys
@@ -901,6 +902,196 @@ def _run_export_mode(output, export_bytes):
     return written
 
 
+#: Template names for the photo-card sample, in spine order.
+_PHOTO_CARD_VARIANTS = (
+    "Film Photo Card - Xpan",
+    "Film Photo Card - 2x3",
+    "Film Photo Card - Xpan Vertical",
+    "Film Photo Card - 3x2 Vertical",
+)
+
+#: Pixel sizes for the four synthetic source stills, matching each shape.
+_PHOTO_CARD_SIZES = ((600, 240), (600, 400), (240, 600), (400, 600))
+
+#: Invented caption lines shown by the Text parameter of each card.
+_PHOTO_CARD_TEXTS = (
+    "Check meadow light | Check film 01",
+    "Check river mist | Check film 02",
+    "Check hill dusk | Check film 03",
+    "Check grove shade | Check film 04",
+)
+
+#: Card lengths in seconds, distinct and back to back from zero.
+_PHOTO_CARD_SECONDS = (3, 4, 5, 6)
+
+#: Sequence grid for the photo-card sample (an invented 30p rate).
+_PHOTO_CARD_FRAME_DURATION = Fraction(1, 30)
+
+#: Keys for the two published text parameters every variant shares.
+_PHOTO_CARD_TEXT_KEY = "9999/10003/20000/20001/2/369"
+_PHOTO_CARD_SHOW_KEY = "9999/29001/100/29002/2/100"
+
+_PHOTO_CARD_EVENT_NAME = "Check photo cards"
+_PHOTO_CARD_PROJECT_NAME = "Check photo cards story"
+
+
+def _photo_card_plan():
+    """Return the four-card plan (numbers, names, offsets, durations)."""
+    plan = []
+    offset = Fraction(0, 1)
+    for pos in range(len(_PHOTO_CARD_VARIANTS)):
+        number = pos + 1
+        variant = _PHOTO_CARD_VARIANTS[pos]
+        stem = "check-photo-%03d" % number
+        duration = _fit_duration(
+            Fraction(_PHOTO_CARD_SECONDS[pos], 1),
+            _PHOTO_CARD_FRAME_DURATION,
+        )
+        plan.append({
+            "number": number,
+            "variant": variant,
+            "stem": stem,
+            "still_file": "photo-card-still-%03d.jpg" % number,
+            "card_name": "P%03d PHOTO | %s" % (number, stem),
+            "still_name": "S%03d SOURCE | %s" % (number, stem),
+            "text": _PHOTO_CARD_TEXTS[pos],
+            "offset": offset,
+            "duration": duration,
+        })
+        offset += duration
+    return plan
+
+
+def _build_cached_photo_stills():
+    """Build the four synthetic source stills; return {filename: path}."""
+    from tests import media_fixtures
+
+    made = {}
+    for pos, size in enumerate(_PHOTO_CARD_SIZES):
+        filename = "photo-card-still-%03d.jpg" % (pos + 1)
+        made[filename] = media_fixtures.make_still(size=size)
+    return made
+
+
+def _build_photo_card_root(still_uris, plan):
+    """Build the photo-card FCPXML root for the still URIs and plan."""
+    root = ET.Element("fcpxml", {"version": "1.14"})
+    resources = ET.SubElement(root, "resources")
+    ET.SubElement(resources, "format", {
+        "id": "r1",
+        "frameDuration": _fmt_time(_PHOTO_CARD_FRAME_DURATION),
+        "width": "1280",
+        "height": "720",
+    })
+    for pos, entry in enumerate(plan):
+        variant = entry["variant"]
+        ET.SubElement(resources, "effect", {
+            "id": "r%d" % (pos + 2),
+            "name": variant,
+            "uid": ("~/Generators.localized/Film Photo Cards/"
+                    "%s/%s.motn" % (variant, variant)),
+        })
+    for pos, entry in enumerate(plan):
+        asset = ET.SubElement(resources, "asset", {
+            "id": "r%d" % (pos + 6),
+            "name": entry["stem"],
+            "start": _fmt_time(Fraction(0, 1)),
+            "duration": _fmt_time(entry["duration"]),
+            "hasVideo": "1",
+        })
+        ET.SubElement(asset, "media-rep", {
+            "kind": "original-media",
+            "src": still_uris[pos],
+        })
+    library = ET.SubElement(root, "library")
+    event = ET.SubElement(library, "event",
+                          {"name": _PHOTO_CARD_EVENT_NAME})
+    for pos, entry in enumerate(plan):
+        ET.SubElement(event, "asset-clip", {
+            "ref": "r%d" % (pos + 6),
+            "name": entry["still_name"],
+            "start": _fmt_time(Fraction(0, 1)),
+            "duration": _fmt_time(entry["duration"]),
+        })
+    project = ET.SubElement(event, "project",
+                            {"name": _PHOTO_CARD_PROJECT_NAME})
+    total = sum((entry["duration"] for entry in plan), Fraction(0, 1))
+    sequence = ET.SubElement(project, "sequence", {
+        "format": "r1",
+        "duration": _fmt_time(total),
+        "tcStart": "0s",
+        "tcFormat": "NDF",
+        "audioLayout": "stereo",
+        "audioRate": "48k",
+    })
+    spine = ET.SubElement(sequence, "spine")
+    for pos, entry in enumerate(plan):
+        card = ET.SubElement(spine, "video", {
+            "ref": "r%d" % (pos + 2),
+            "offset": _fmt_time(entry["offset"]),
+            "name": entry["card_name"],
+            "start": _fmt_time(Fraction(0, 1)),
+            "duration": _fmt_time(entry["duration"]),
+        })
+        ET.SubElement(card, "param", {
+            "name": "Text",
+            "key": _PHOTO_CARD_TEXT_KEY,
+            "value": entry["text"],
+        })
+        ET.SubElement(card, "param", {
+            "name": "Show camera/film",
+            "key": _PHOTO_CARD_SHOW_KEY,
+            "value": "1",
+        })
+        note = ET.SubElement(card, "note")
+        note.text = ("Photo card P%03d shows source still S%03d (%s)."
+                     % (entry["number"], entry["number"], entry["stem"]))
+    return root
+
+
+def _photo_card_manifest_bytes(plan):
+    """Render the manifest JSON bytes for the plan (no paths, no times)."""
+    cards = []
+    for entry in plan:
+        cards.append({
+            "number": entry["number"],
+            "variant": entry["variant"],
+            "card_name": entry["card_name"],
+            "still_name": entry["still_name"],
+            "stem": entry["stem"],
+            "still_file": entry["still_file"],
+            "offset": _fmt_time(entry["offset"]),
+            "duration": _fmt_time(entry["duration"]),
+            "text": entry["text"],
+        })
+    return (json.dumps({"version": 1, "cards": cards},
+                       sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def _run_photo_card_mode(output):
+    cached = _build_cached_photo_stills()
+    media_dir = output / "media"
+    media_dir.mkdir(parents=True, exist_ok=False)
+    written = []
+    plan = _photo_card_plan()
+    still_uris = []
+    for entry in plan:
+        dest = media_dir / entry["still_file"]
+        _copy_file_exclusive(cached[entry["still_file"]], dest)
+        written.append(dest)
+        still_uris.append(dest.resolve().as_uri())
+    root = _build_photo_card_root(still_uris, plan)
+    card_path = output / "photo-card.fcpxml"
+    _write_bytes_exclusive(
+        card_path,
+        (_XML_HEADER + ET.tostring(root, encoding="unicode")).encode("utf-8"))
+    written.append(card_path)
+    manifest_path = output / "photo-card-manifest.json"
+    _write_bytes_exclusive(manifest_path, _photo_card_manifest_bytes(plan))
+    written.append(manifest_path)
+    return written
+
+
 def main(argv=None):
     """Entry point for ``python3 -m tests.fcp_samples``."""
     parser = argparse.ArgumentParser(
@@ -909,11 +1100,17 @@ def main(argv=None):
                         help="new empty folder to write the samples into")
     parser.add_argument("--from-export", default=None,
                         help="event export .fcpxml file or .fcpxmld folder")
+    parser.add_argument("--photo-card", action="store_true",
+                        help="write the photo-card sample instead of the media mode")
     args = parser.parse_args(argv)
     output_arg = args.output
     refusal = _output_refusal(output_arg)
     if refusal is not None:
         print("refusing output %s: %s" % (output_arg, refusal), file=sys.stderr)
+        return 2
+    if args.photo_card and args.from_export is not None:
+        print("refusing output %s: --photo-card cannot be used with --from-export"
+              % output_arg, file=sys.stderr)
         return 2
     output = Path(output_arg)
     export_bytes = None
@@ -945,6 +1142,8 @@ def main(argv=None):
         except ValueError as exc:
             print("refusing export %s: %s" % (args.from_export, exc), file=sys.stderr)
             return 2
+    elif args.photo_card:
+        written = _run_photo_card_mode(output)
     else:
         written = _run_media_mode(output)
     for path in written:
