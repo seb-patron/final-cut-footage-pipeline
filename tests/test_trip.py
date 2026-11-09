@@ -133,6 +133,31 @@ class TestTrip(unittest.TestCase):
             self.assertEqual(caught, [])
             self.assertEqual(settings.title, "Harborlight Survey")
 
+    def test_offline_key_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_project_trip(
+                Path(tmp), contract_text(pipeline_extra="offline = true\n")
+            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                settings = load_trip(trip)
+            self.assertTrue(settings.offline)
+            self.assertEqual(caught, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_project_trip(Path(tmp), contract_text())
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                settings = load_trip(trip)
+            self.assertFalse(settings.offline)
+            self.assertEqual(caught, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = write_project_trip(
+                Path(tmp), contract_text(pipeline_extra='offline = "yes"\n')
+            )
+            with self.assertRaises(TripSettingsError) as raised:
+                load_trip(trip)
+            self.assertIn("[pipeline].offline", str(raised.exception))
+
     def test_minimal_fixture_loads(self):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")

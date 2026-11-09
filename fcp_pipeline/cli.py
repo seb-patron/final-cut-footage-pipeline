@@ -12,6 +12,8 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from .net import OfflineError, set_offline
+
 MAIN_PATH_STEPS = (
     "scan",
     "pull",
@@ -95,17 +97,35 @@ def build_parser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(step.name, help=help_text)
         sub.add_argument("--trip", required=True, help="trip folder holding project.toml")
         sub.add_argument("--dry-run", action="store_true", help="plan only; change nothing")
+        sub.add_argument(
+            "--offline",
+            action="store_true",
+            help="refuse every network call before connecting",
+        )
     run_parser = subparsers.add_parser(
         "run", help="run the built main-path steps in order (never ingest)"
     )
     run_parser.add_argument("--trip", required=True, help="trip folder holding project.toml")
     run_parser.add_argument("--dry-run", action="store_true", help="plan only; change nothing")
+    run_parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="refuse every network call before connecting",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command == "run":
-        return run_command(args.trip, args.dry_run)
-    return run_step(_find_step(args.command), args.trip, args.dry_run)
+    if getattr(args, "offline", False):
+        set_offline(True)
+    try:
+        if args.command == "run":
+            return run_command(args.trip, args.dry_run)
+        return run_step(_find_step(args.command), args.trip, args.dry_run)
+    except OfflineError as exc:
+        # A handler refused a network call while offline: report one line
+        # on stderr and exit 3, never a traceback.
+        print(" ".join(str(exc).split()), file=sys.stderr)
+        return NOT_BUILT_EXIT_CODE

@@ -127,7 +127,7 @@ Validate an exported candidate against the installed DTD and use a dedicated syn
 
 This is a clean source snapshot with independent history. No private repository history, real footage, project transcripts, native library databases or personal project evidence is distributed. Runtime proposal/audit files contain absolute source paths and may contain transcripts, so treat them as private. Do not post them publicly without reviewing and redacting their contents.
 
-The CLI makes no network requests. FFmpeg and Apple Vision are invoked locally. There is no automatic import or live-library access. The tool's approval flags are a local review convention, not an access-control boundary.
+The prototype commands make no network requests. The pipeline package reaches the network only through its network gate: `offline = true` in `[pipeline]` or `--offline` refuses every call before connecting, and every call is logged to `.pipeline/network-log.tsv` with kinds and sizes, never content. See [docs/privacy.md](docs/privacy.md). FFmpeg and Apple Vision are invoked locally. There is no automatic import or live-library access. The tool's approval flags are a local review convention, not an access-control boundary.
 
 ## License
 
