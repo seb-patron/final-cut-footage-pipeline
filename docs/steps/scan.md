@@ -109,8 +109,63 @@ file, then a summary line such as `scanned 2, skipped 5, unreadable 1`.
 - `1`: the trip or catalog could not be read, or a file changed
   mid-scan.
 
+## Days, places and gear
+
+Once the scan has recorded each clip's facts, the days-and-places step
+works out when and where each clip was shot and files that away as
+keywords in the catalog. Every clip and still captured on or after
+the trip's start date gets a trip day; a clip captured before the trip
+starts gets no day, and a row with no capture time is left alone. A
+clip whose camera recorded a position inside one of the trip's places
+gets that place, and every clip with a known camera also gets a gear
+keyword naming that camera. A clip whose time came only from the file's
+own modification time keeps its day keyword marked "check" so you can
+confirm it by hand. Positions that fall outside every place are grouped
+into small unnamed clusters per day (each point joins the first cluster
+within 500 metres of it), for the later memo step to name. Nothing
+calls this step yet; running it by hand looks like this:
+
+```
+python3 -m fcp_pipeline.days_places --trip <folder>
+```
+
+Day 1 is the trip's start date from `project.toml`. Before the day is
+counted, the capture time is moved twice: first by the camera's clock
+offset, an entry under `clock_offsets` named exactly like the camera
+the scan recorded (a camera with no entry counts as no offset), and
+then into the trip's time zone. A clip captured at 23:58 on the start
+date from a camera with a `+00:03:10` clock offset belongs to Day 2,
+because its corrected local time is 00:01:10 the next morning.
+
+Places come from the `[[pipeline.places]]` tables in `project.toml`,
+each with a name, a centre point and a radius in metres, for example:
+
+```
+[[pipeline.places]]
+name = "Invented Cove"
+lat = 12.5
+lon = 45.25
+radius_m = 500
+```
+
+A clip counts as inside a place when its recorded position is within
+the radius, measured as a great-circle distance; when several places
+overlap, the nearest centre wins. A clip with no position, or one
+outside every radius, simply gets no place.
+
+A rerun never deletes a keyword it wrote before: a place keyword from
+an earlier run stays even when the position no longer matches, and
+running the step twice leaves exactly one keyword of each kind per
+clip. The step prints one line per unnamed cluster and a final count
+such as `assigned 5, before-start 0, no-time 1, check 2`. Its exit codes
+mirror the scan's: `0` when the run completed, `2` when the command was
+used wrongly, and `1` when the trip, the catalog, a place entry or the
+time zone could not be read. It writes nothing but the catalog (besides
+SQLite's own side file inside `.pipeline/`).
+
 ## What comes later
 
 The scan reports audio stream counts and pixel sizes but does not store
-them. Reading the Final Cut export's clips, and assigning each clip its
-day and place, come in later steps.
+them. Assigning each clip its day and place is done by the step above.
+Naming the unnamed clusters, and reading the Final Cut export's clips,
+come in later steps.
