@@ -9,6 +9,12 @@ Generators (all cached, see below):
   clip is encoded by frame count, so the actual duration is exactly
   ``frames / rate`` (for example, 1 s at 30000/1001 is 30 frames =
   1001/1000 s); see :func:`clip_frames` and :func:`clip_duration`.
+  Audio rule: when an audio stream is present it is 48 kHz PCM
+  (``pcm_s16le``) trimmed to exactly ``round(duration x 48000)``
+  samples, so the audio, video and container durations agree to
+  within one audio sample on every ffmpeg build. AAC is deliberately
+  not used: its encoder priming/padding lengthens the audio stream
+  by a build-dependent amount (about one codec frame or more).
 - :func:`make_still`: a single-frame JPEG of a given pixel size, optionally
   stamped with EXIF dates via exiftool.
 - :func:`make_audio`: a 16-bit PCM WAV holding a 440 Hz tone or silence.
@@ -201,13 +207,28 @@ def _build_clip(path, seconds, rate, size, start_timecode, creation_time,
     """Run ffmpeg once to build a clip at ``path`` (no cache lookup).
 
     The clip holds exactly ``clip_frames(seconds, rate)`` video frames:
-    encoding is limited with ``-frames:v`` (plus ``-shortest`` when an
-    audio stream is present), never with ``-t``, so the duration is
-    exactly ``clip_duration(seconds, rate)``.
+    encoding is limited with ``-frames:v``, never with ``-t``, so the
+    video duration is exactly ``clip_duration(seconds, rate)``.
+
+    Audio rule: when ``audio`` is not ``None`` the audio stream is
+    48 kHz PCM (``pcm_s16le``) trimmed with ``atrim=end_sample=N`` to
+    exactly ``N = max(1, round(duration x 48000))`` samples, where
+    ``duration`` is ``clip_duration(seconds, rate)``. PCM has no
+    encoder priming or padding, so the audio, video and container
+    durations agree to within one audio sample on every ffmpeg
+    build. (AAC instead pads by a codec-frame-dependent amount that
+    varies by build, which lengthened the audio stream and therefore
+    the container on some builds.)
     """
     ffmpeg, _ = _require_ffmpeg()
     width, height = size
     frames = clip_frames(seconds, rate)
+    audio_samples = None
+    if audio is not None:
+        # At least one sample: a one-frame clip at a very high rate
+        # can round to zero samples, which atrim rejects.
+        audio_samples = max(
+            1, round(clip_duration(seconds, rate) * 48000))
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-f", "lavfi", "-i",
@@ -219,15 +240,15 @@ def _build_clip(path, seconds, rate, size, start_timecode, creation_time,
         command += ["-f", "lavfi", "-i",
                     "anullsrc=sample_rate=48000:channel_layout=mono"]
     command += ["-frames:v", str(frames)]
-    if audio is not None:
-        command += ["-shortest"]
+    if audio_samples is not None:
+        command += ["-af", "atrim=end_sample=%d" % audio_samples]
     command += ["-map", "0:v"]
     if audio is not None:
         command += ["-map", "1:a"]
     command += ["-c:v", "libx264", "-preset", "ultrafast", "-threads", "1",
                 "-pix_fmt", "yuv420p"]
     if audio is not None:
-        command += ["-c:a", "aac"]
+        command += ["-c:a", "pcm_s16le"]
     command += ["-fflags", "+bitexact",
                 "-flags:v", "+bitexact", "-flags:a", "+bitexact"]
     if start_timecode is not None:
@@ -256,9 +277,9 @@ def make_clip(seconds=1, rate="30000/1001", size=(64, 36),
 
     Whole-frame rule: the requested ``seconds`` are converted to
     ``round(seconds x rate)`` frames (see :func:`clip_frames`), the clip
-    is encoded by frame count (``-frames:v``, plus ``-shortest`` when an
-    audio stream is present; never ``-t``), and the actual duration is
-    exactly ``frames / rate`` (see :func:`clip_duration`). For example,
+    is encoded by frame count (``-frames:v``; never ``-t``), and the
+    actual duration is exactly ``frames / rate``
+    (see :func:`clip_duration`). For example,
     1 s at 30000/1001 is 30 frames = 1001/1000 s, and 1 s at 25/1 is
     25 frames = 1 s. The clip holds exactly ``rate`` (ffprobe video
     ``r_frame_rate``), ``size`` pixels and ``start_timecode``.
@@ -267,7 +288,10 @@ def make_clip(seconds=1, rate="30000/1001", size=(64, 36),
     ``model`` and ``location`` (an ISO 6709 string) are written as the
     matching ``com.apple.quicktime.*`` keys; ``None`` writes nothing.
     ``audio`` is ``"tone"`` (440 Hz sine), ``"silent"`` or ``None`` (no
-    audio stream). ``container`` is ``"mov"`` or ``"mp4"``.
+    audio stream). A present audio stream is 48 kHz PCM (``pcm_s16le``)
+    trimmed to exactly ``round(duration x 48000)`` samples, so its
+    duration matches the video duration to within one audio sample on
+    every ffmpeg build. ``container`` is ``"mov"`` or ``"mp4"``.
 
     The returned path's clip has the frame count and exact duration
     recorded by :func:`clip_frames` and :func:`clip_duration` for the

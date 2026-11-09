@@ -136,11 +136,22 @@ class TestMedia(unittest.TestCase):
                         self.assertLessEqual(
                             abs(float(text) - float(want_duration)),
                             half_frame)
+                # Audio rule: the fixture encodes 48 kHz PCM trimmed to
+                # exactly round(duration x 48000) samples, so the audio
+                # duration matches the wanted duration to within one
+                # sample (plus ffprobe microsecond rounding). One AAC
+                # codec frame (1024 samples ~= 21 ms) already exceeds
+                # this, which is why the fixture uses PCM: AAC
+                # priming/padding stretched the audio and container by
+                # ~23 ms on some ffmpeg builds.
+                audio_tolerance = 1.5 / 48000
                 for stream in probed["streams"]:
                     if stream.get("codec_type") == "audio":
                         with self.subTest(part="audio"):
-                            self.assertLessEqual(float(stream["duration"]),
-                                                 float(video["duration"]))
+                            self.assertLessEqual(
+                                abs(float(stream["duration"])
+                                    - float(want_duration)),
+                                audio_tolerance)
 
     def test_clip_creation_date(self):
         moment = datetime(2020, 1, 2, 3, 4, 5, tzinfo=_UTC)
