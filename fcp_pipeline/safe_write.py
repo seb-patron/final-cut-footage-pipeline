@@ -63,7 +63,12 @@ class SafeWriteError(Exception):
     """Raised when a safe write is refused.
 
     The message names the path and the rule it broke. A refusal leaves
-    nothing behind: no file, no temporary file and no new folder.
+    nothing behind other than the persistent lock file in .pipeline/:
+    no new file, no temporary file and no new folder. A refusal from
+    the lock-path check creates no new lock file and removes nothing;
+    the lock file .pipeline/safe-write.lock that an earlier numbered
+    write created stays in place by design (never unlinked,
+    git-ignored, harmless).
     """
 
 
@@ -157,7 +162,9 @@ class SafeWriter:
         """Refuse protected, disallowed or oversized targets.
 
         Runs before anything is created on disk, so a refusal leaves
-        nothing behind.
+        nothing behind other than the persistent lock file in .pipeline/
+        (a refusal from the lock-path check creates no new lock file
+        and never removes that lock file).
         """
         for label, root in self._protected:
             if resolved == root or resolved.is_relative_to(root):
@@ -257,11 +264,14 @@ class SafeWriter:
     def _check_lock_path(self, lock: Path) -> None:
         """Refuse a number-lock path that escapes the project's ``.pipeline/``.
 
-        Runs before the lock file is created or opened, so a refusal
-        leaves nothing behind. The resolved lock must sit directly inside
-        the project's ``.pipeline/`` and must pass every target rule
-        (protected media / Final Cut / card paths, ``*.fcpbundle`` parts
-        and the pipeline-owned-folders check), exactly like a write target.
+        Runs before the lock file is created or opened: a refusal
+        creates no new lock file and removes nothing. The lock file
+        .pipeline/safe-write.lock that an earlier numbered write created
+        stays in place by design (never unlinked, git-ignored, harmless).
+        The resolved lock must sit directly inside the project's
+        ``.pipeline/`` and must pass every target rule (protected media
+        / Final Cut / card paths, ``*.fcpbundle`` parts and the
+        pipeline-owned-folders check), exactly like a write target.
         """
         resolved = lock.resolve()
         if resolved.parent != self._pipeline:

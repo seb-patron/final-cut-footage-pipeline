@@ -45,7 +45,10 @@ That lock path is checked against every rule above before the lock file
 is created or opened: it must resolve to inside the project's own
 `.pipeline/` folder, so a `.pipeline/` shortcut pointing into media, a
 Final Cut library, or anywhere else outside `.pipeline/` makes the write
-a refusal that leaves nothing behind. The lock file itself is then
+a refusal that creates no new lock file and removes nothing: the lock
+file `.pipeline/safe-write.lock` that an earlier numbered write created
+stays in place by design (never unlinked, git-ignored, harmless).
+The lock file itself is then
 opened relative to the project folder rather than by a bare path: the
 project folder, `.pipeline/`, and the lock file are each opened with
 shortcuts refused instead of followed, and the opened folder is checked
