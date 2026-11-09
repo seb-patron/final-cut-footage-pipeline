@@ -13,6 +13,7 @@ appended to, through the network log's hardened writer.
 from __future__ import annotations
 
 import datetime
+import math
 import os
 import warnings
 from decimal import Decimal, ROUND_HALF_UP
@@ -30,6 +31,19 @@ USAGE_LABEL = "AI usage log"
 _COST_PLACES = Decimal("0.000001")
 
 
+def _finite_rate(value):
+    """Return a usable dollars-per-million rate, or None without a price.
+
+    Anything that is not a finite number (including booleans) counts
+    as no price, so the cost cell stays empty instead of failing.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
 def cost_for_model(ai_table, model, input_tokens: int, output_tokens: int) -> str:
     """Return the call cost as a six-decimal string, or "" without a price.
 
@@ -45,6 +59,10 @@ def cost_for_model(ai_table, model, input_tokens: int, output_tokens: int) -> st
         input_rate = entry["input_per_million"]
         output_rate = entry["output_per_million"]
     except KeyError:
+        return ""
+    input_rate = _finite_rate(input_rate)
+    output_rate = _finite_rate(output_rate)
+    if input_rate is None or output_rate is None:
         return ""
     cost = (
         Decimal(str(input_rate)) * int(input_tokens)

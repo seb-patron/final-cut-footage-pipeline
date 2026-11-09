@@ -14,6 +14,7 @@ recorded without creating or checking them.
 """
 
 import datetime
+import math
 import re
 import tomllib
 import warnings
@@ -49,6 +50,10 @@ AI_PROVIDERS = ("openai", "anthropic")
 AI_AUDIO_PROVIDERS = ("openai", "local")
 
 
+class TripSettingsError(ValueError):
+    """Raised when a trip folder's project.toml cannot be loaded."""
+
+
 def _ai_error(key: str, what: str) -> TripSettingsError:
     """Build a settings error naming a ``[pipeline.ai...]`` key."""
     return TripSettingsError(f"project.toml key '{key}' {what}")
@@ -81,7 +86,7 @@ def _check_ai_tokens(key: str, value) -> int:
 def _check_ai_price(key: str, value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise _ai_error(key, "must be a non-negative number")
-    if value < 0:
+    if not math.isfinite(value) or value < 0:
         raise _ai_error(key, "must be a non-negative number")
     return value
 
@@ -209,10 +214,6 @@ def _validate_ai_table(raw) -> dict:
     return out
 
 _CLOCK_OFFSET_RE = re.compile(r"([+-]?)([0-9]+):([0-5][0-9]):([0-5][0-9])")
-
-
-class TripSettingsError(ValueError):
-    """Raised when a trip folder's project.toml cannot be loaded."""
 
 
 @dataclass(frozen=True)

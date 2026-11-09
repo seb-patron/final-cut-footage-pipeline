@@ -147,11 +147,15 @@ class TestContract(unittest.TestCase):
                     self.assertEqual(reply.input_tokens, input_tokens)
                     self.assertEqual(reply.output_tokens, output_tokens)
                     self.assertEqual(validate(reply.data, SCHEMA), [])
-                    if image:
+                    if image or backend_name == "anthropic":
                         request = backend.build_request(
                             "fake-contract-model",
                             "Describe the harbor frame.",
-                            [Image(b"\x89PNG-fake-bytes-4417", "image/png")],
+                            (
+                                [Image(b"\x89PNG-fake-bytes-4417", "image/png")]
+                                if image
+                                else []
+                            ),
                             SCHEMA,
                             64,
                         )
@@ -164,14 +168,25 @@ class TestContract(unittest.TestCase):
                                 )
                             )
                         else:
-                            block = request["messages"][0]["content"][0]
-                            self.assertEqual(block["type"], "image")
                             self.assertEqual(
-                                block["source"]["media_type"], "image/png"
+                                request["output_config"]["format"]["type"],
+                                "json_schema",
                             )
                             self.assertEqual(
-                                block["source"]["type"], "base64"
+                                request["output_config"]["format"]["schema"],
+                                SCHEMA,
                             )
+                            self.assertNotIn("tools", request)
+                            self.assertNotIn("tool_choice", request)
+                            if image:
+                                block = request["messages"][0]["content"][0]
+                                self.assertEqual(block["type"], "image")
+                                self.assertEqual(
+                                    block["source"]["media_type"], "image/png"
+                                )
+                                self.assertEqual(
+                                    block["source"]["type"], "base64"
+                                )
 
 
 if __name__ == "__main__":

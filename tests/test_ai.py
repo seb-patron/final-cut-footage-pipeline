@@ -98,10 +98,10 @@ def openai_raw(answer_text: str, input_tokens=1000, output_tokens=500) -> dict:
 
 
 def anthropic_raw(answer: dict, input_tokens=1000, output_tokens=500) -> dict:
-    """Recorded-style Anthropic Messages result carrying ``answer``."""
+    """Recorded-style Anthropic Messages result carrying ``answer`` as text JSON."""
     return {
         "content": [
-            {"type": "tool_use", "name": "answer", "input": answer},
+            {"type": "text", "text": json.dumps(answer)},
         ],
         "usage": {
             "input_tokens": input_tokens,
@@ -797,12 +797,102 @@ class TestAi(unittest.TestCase):
             self.assertTrue(
                 all(issubclass(record.category, UserWarning) for record in caught)
             )
+            warned = sorted(str(record.message) for record in caught)
+            self.assertEqual(
+                warned,
+                [
+                    "unknown project.toml key: [pipeline.ai].bogus",
+                    "unknown project.toml key: [pipeline.ai].spare_key",
+                ],
+            )
+            for message in warned:
+                self.assertNotIn("provider", message)
+                self.assertNotIn("model", message)
             # A top-level ai table belongs under [pipeline].
             with self.assertRaises(TripSettingsError) as raised_top:
                 load_trip(
                     write_project(Path(tmp), "[ai]\nmodel = \"x\"\n")
                 )
             self.assertIn("belongs under [pipeline]", str(raised_top.exception))
+
+    def test_ai_prices_reject_bad_rates(self):
+        from fcp_pipeline.trip import TripSettingsError
+
+        cases = {
+            "nan input": ("input_per_million", "nan"),
+            "inf input": ("input_per_million", "inf"),
+            "minus inf input": ("input_per_million", "-inf"),
+            "nan output": ("output_per_million", "nan"),
+            "inf output": ("output_per_million", "inf"),
+            "minus inf output": ("output_per_million", "-inf"),
+            "negative input": ("input_per_million", "-2.5"),
+            "string output": ("output_per_million", '"lots"'),
+            "boolean input": ("input_per_million", "true"),
+        }
+        for name, (rate_key, toml_value) in cases.items():
+            with self.subTest(case=name):
+                other = (
+                    "output_per_million"
+                    if rate_key == "input_per_million"
+                    else "input_per_million"
+                )
+                with tempfile.TemporaryDirectory() as tmp:
+                    with self.assertRaises(TripSettingsError) as raised:
+                        load_trip(
+                            write_project(
+                                Path(tmp),
+                                "[pipeline.ai]\n"
+                                'provider = "openai"\n'
+                                'model = "fake-openai-model"\n'
+                                '[pipeline.ai.prices."fake-openai-model"]\n'
+                                f"{rate_key} = {toml_value}\n"
+                                f"{other} = 10\n",
+                            )
+                        )
+                self.assertIn(rate_key, str(raised.exception))
+
+    def test_usage_cost_empty_without_finite_price(self):
+        from fcp_pipeline.ai.usage import cost_for_model
+
+        for rates in (
+            {"input_per_million": float("nan"), "output_per_million": 10},
+            {"input_per_million": float("inf"), "output_per_million": 10},
+            {"input_per_million": 10, "output_per_million": float("-inf")},
+            {"input_per_million": True, "output_per_million": 10},
+            {"input_per_million": "lots", "output_per_million": 10},
+        ):
+            with self.subTest(rates=rates):
+                self.assertEqual(
+                    cost_for_model({"prices": {"m": rates}}, "m", 1000, 500),
+                    "",
+                )
+
+    def test_anthropic_text_parse_edges(self):
+        ai_extra = (
+            "[pipeline.ai]\n"
+            'provider = "anthropic"\n'
+            'model = "fake-anthropic-model"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_trip(write_project(Path(tmp), ai_extra))
+            backend = AnthropicBackend(NetworkGate(settings, "tag"))
+            for content in (
+                [],
+                [{"type": "text", "text": "   "}],
+                [{"type": "text", "text": "not json {"}],
+                [{"type": "tool_use", "name": "answer", "input": {}}],
+            ):
+                with self.subTest(content=content):
+                    reply = backend.parse_response(
+                        {
+                            "content": content,
+                            "usage": {"input_tokens": 7, "output_tokens": 3},
+                        }
+                    )
+                    self.assertIsNone(reply.data)
+                    self.assertEqual(
+                        (reply.input_tokens, reply.output_tokens), (7, 3)
+                    )
 
     def test_refused_usage_write_keeps_answer(self):
         ai_extra = (

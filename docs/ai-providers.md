@@ -23,7 +23,7 @@ model = "<model-id>"
 ```
 
 With this example, the tag step asks Claude with its own model, while
-photos, memo, organize, and roughcut ask OpenAI with the shared model. A
+photos, memo, organize, and roughcut ask OpenAI with the shared model. Claude answers use structured outputs: the step's JSON schema is sent in `output_config` and the answer is read back as JSON from a text block, with no tool calls. A
 step uses its own table's values when they are set, else the shared
 `[pipeline.ai]` values, else the defaults (OpenAI, 4096 output tokens).
 The available step tables are `[pipeline.ai.tag]`,
