@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import sys
 from dataclasses import dataclass
 from fractions import Fraction
@@ -31,7 +32,6 @@ from fcp_pipeline.catalog import (
     TagRecord,
     TranscriptSegmentRecord,
 )
-from fcp_pipeline.safe_write import SafeWriteError
 from fcp_pipeline.trip import TripSettingsError, load_trip
 
 __all__ = [
@@ -80,6 +80,9 @@ TAKE_FOLDER = "Take"
 
 #: Callout kinds that end the take before them.
 _END_KINDS = ("keeper", "trash", "again")
+
+#: --gap accepts only a plain decimal number of seconds.
+_GAP_RE = re.compile(r"[0-9]+(\.[0-9]+)?$")
 
 #: The (folder, value) stored for each callout kind.
 _TAGS_FOR_KIND = {
@@ -302,19 +305,16 @@ def _split_chunks(
     """Split flat words into chunks at pauses and take-ending callouts.
 
     Returns ``(start, stop, end_kind)`` triples in order, where
-    ``end_kind`` is the callout word that ended the chunk or None.
+    ``end_kind`` is the callout word that ended the chunk or None. The
+    pause check runs before the callout check, so when the pause before
+    a take-ending callout is longer than ``gap`` the take ends at that
+    pause and the callout opens a new chunk with no take before it.
     """
     chunks: list[tuple[int, int, str | None]] = []
     start = 0
     index = 0
     total = len(flat)
     while index < total:
-        kind = kinds[index]
-        if kind in _END_KINDS:
-            chunks.append((start, index, kind))
-            start = index + 1
-            index += 1
-            continue
         if index > start:
             previous = flat[index - 1][1]
             current = flat[index][1]
@@ -327,6 +327,12 @@ def _split_chunks(
                 start = index
                 index += 1
                 continue
+        kind = kinds[index]
+        if kind in _END_KINDS:
+            chunks.append((start, index, kind))
+            start = index + 1
+            index += 1
+            continue
         index += 1
     chunks.append((start, total, None))
     return chunks
@@ -364,8 +370,10 @@ def find_takes(
     the start of the clip, a recognized ``keeper``, ``trash`` or
     ``again`` callout (each ends the take before it), or a pause
     strictly longer than ``gap`` between two consecutive words. A
-    ``mark`` callout never ends a take. A chunk with no speech words is
-    not a take.
+    ``mark`` callout never ends a take. When the pause before a
+    take-ending callout is longer than ``gap``, the take ends at that
+    pause and the callout has no take before it. A chunk with no speech
+    words is not a take.
     """
     _require_gap(gap)
     flat = _flattened_words(segments)
@@ -445,7 +453,13 @@ def _process_clip(
             start = _snap_down(record.start, frame)
             length = frame
         else:
-            bounds = _speech_bounds(flat, kinds, chunk_start_at[index], index)
+            chunk_start = chunk_start_at.get(index)
+            if chunk_start is None:
+                notes.append(
+                    f"no take before {kind} at {_display_time(record.start)}"
+                )
+                continue
+            bounds = _speech_bounds(flat, kinds, chunk_start, index)
             if bounds is None:
                 notes.append(
                     f"no take before {kind} at {_display_time(record.start)}"
@@ -554,6 +568,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Report what would be tagged without writing anything.",
     )
     args = parser.parse_args(argv)
+    if _GAP_RE.fullmatch(str(args.gap)) is None:
+        parser.error(
+            f"bad --gap {args.gap!r}: must be a number of seconds above 0"
+        )
     try:
         gap = Fraction(str(args.gap))
     except (ValueError, ZeroDivisionError):
@@ -571,7 +589,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         catalog = Catalog.open(settings)
-    except (CatalogError, SafeWriteError, OSError) as exc:
+    except (CatalogError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:
@@ -581,7 +599,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         except CalloutError as exc:
             parser.error(f"bad --gap {args.gap!r}: {exc}")
-        except (CatalogError, SafeWriteError, OSError) as exc:
+        except (CatalogError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     finally:

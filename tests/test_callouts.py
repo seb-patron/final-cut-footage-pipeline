@@ -22,6 +22,7 @@ from fcp_pipeline.callouts import (
 )
 from fcp_pipeline.catalog import (
     Catalog,
+    CatalogError,
     MediaRecord,
     TagRecord,
     TranscriptSegmentRecord,
@@ -609,6 +610,192 @@ class TestCallouts(unittest.TestCase):
                     ),
                     entry.notes,
                 )
+
+    def test_long_pause_before_ending_callout_stores_nothing(self):
+        speech = word_segment(
+            [("hello", "0.0", "0.5"), ("world", "0.6", "1.0")],
+            text="hello world",
+        )
+        far = word_segment([("Keeper.", "4.0", "4.4")], text="Keeper.")
+        near = word_segment([("Keeper.", "2.5", "2.9")], text="Keeper.")
+        gap = Fraction(2, 1)
+        with self.subTest("pause longer than gap leaves keeper with no take"):
+            records = segment_records({"segments": [speech, far]})
+            callouts = find_callouts(records)
+            self.assertEqual(
+                [call.kind for call in callouts], ["keeper"]
+            )
+            takes = find_takes(records, callouts, gap=gap)
+            self.assertEqual(
+                [
+                    (take.start, take.stop, take.end_kind)
+                    for take in takes
+                ],
+                [(Fraction(0, 1), Fraction(1, 1), None)],
+            )
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = load_trip(make_trip(tmp))
+            with Catalog.open(settings) as catalog:
+                media_id = add_word_clip(
+                    catalog, tmp, "far-keeper", [speech, far]
+                )
+                result = tag_callouts(catalog, settings, gap=gap)
+                entry = entry_by_asset(result, "test-far-keeper")
+                self.assertEqual(entry.stored, 0)
+                self.assertEqual(
+                    [
+                        tag
+                        for tag in catalog.list_tags(media_id)
+                        if tag.folder == "Rating"
+                    ],
+                    [],
+                )
+                self.assertTrue(
+                    any(
+                        note.startswith("no take before keeper")
+                        for note in entry.notes
+                    ),
+                    entry.notes,
+                )
+        with self.subTest("pause within gap keeps the keeper take"):
+            records = segment_records({"segments": [speech, near]})
+            callouts = find_callouts(records)
+            self.assertEqual(
+                [call.kind for call in callouts], ["keeper"]
+            )
+            takes = find_takes(records, callouts, gap=gap)
+            self.assertEqual(
+                [
+                    (take.start, take.stop, take.end_kind)
+                    for take in takes
+                ],
+                [(Fraction(0, 1), Fraction(1, 1), "keeper")],
+            )
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = load_trip(make_trip(tmp))
+            with Catalog.open(settings) as catalog:
+                media_id = add_word_clip(
+                    catalog, tmp, "near-keeper", [speech, near]
+                )
+                result = tag_callouts(catalog, settings, gap=gap)
+                entry = entry_by_asset(result, "test-near-keeper")
+                self.assertEqual(entry.stored, 1)
+                (favorite,) = [
+                    tag
+                    for tag in catalog.list_tags(media_id)
+                    if tag.folder == "Rating" and tag.value == "Favorite"
+                ]
+                self.assertEqual(favorite.start, Fraction(0, 1))
+                self.assertEqual(favorite.duration, Fraction(1, 1))
+
+    def test_standalone_boundary_exact_pause(self):
+        self.assertEqual(ALONE_PAUSE, Fraction(2, 5))
+
+        def segments_with(before, after):
+            mark_start = Fraction(2, 1) + before
+            mark_stop = mark_start + Fraction(1, 2)
+            following_start = mark_stop + after
+            return [
+                TranscriptSegmentRecord(
+                    idx=0,
+                    start=Fraction(1, 1),
+                    stop=following_start + Fraction(1, 1),
+                    text="invented Mark harbor",
+                    words=[
+                        TranscriptWordRecord(
+                            idx=0,
+                            start=Fraction(1, 1),
+                            stop=Fraction(2, 1),
+                            word="invented",
+                            probability=None,
+                        ),
+                        TranscriptWordRecord(
+                            idx=1,
+                            start=mark_start,
+                            stop=mark_stop,
+                            word="Mark",
+                            probability=None,
+                        ),
+                        TranscriptWordRecord(
+                            idx=2,
+                            start=following_start,
+                            stop=following_start + Fraction(1, 1),
+                            word="harbor",
+                            probability=None,
+                        ),
+                    ],
+                )
+            ]
+
+        exact = Fraction(2, 5)
+        just_short = Fraction(39, 100)
+        with self.subTest("exactly 0.4 s on both sides is a callout"):
+            found = find_callouts(segments_with(exact, exact))
+            self.assertEqual([call.kind for call in found], ["mark"])
+        with self.subTest("0.39 s before is not a callout"):
+            self.assertEqual(
+                find_callouts(segments_with(just_short, exact)), []
+            )
+        with self.subTest("0.39 s after is not a callout"):
+            self.assertEqual(
+                find_callouts(segments_with(exact, just_short)), []
+            )
+
+    def test_gap_accepts_only_plain_decimal(self):
+        with tempfile.TemporaryDirectory() as raw:
+            trip = make_trip(Path(raw))
+            for bad in ("1/2", "-1", "0", "inf", "nan", "2\n"):
+                with self.subTest(gap=bad):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as raised:
+                            main(
+                                [
+                                    "--trip",
+                                    os.fspath(trip),
+                                    "--gap",
+                                    bad,
+                                ]
+                            )
+                    self.assertEqual(raised.exception.code, 2)
+            for good in ("2", "2.5", "0.5"):
+                with self.subTest(gap=good):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        code = main(
+                            [
+                                "--trip",
+                                os.fspath(trip),
+                                "--gap",
+                                good,
+                            ]
+                        )
+                    self.assertEqual(code, 0)
+
+    def test_no_safe_write_dependency(self):
+        import fcp_pipeline.callouts as callouts_module
+
+        self.assertFalse(hasattr(callouts_module, "SafeWriteError"))
+        with tempfile.TemporaryDirectory() as raw:
+            trip = make_trip(Path(raw))
+            with mock.patch.object(
+                Catalog,
+                "open",
+                side_effect=CatalogError("invented refusal"),
+            ):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = main(["--trip", os.fspath(trip)])
+                self.assertEqual(code, 1)
+                self.assertIn("error:", err.getvalue())
+            with mock.patch.object(
+                Catalog, "open", side_effect=OSError("invented failure")
+            ):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = main(["--trip", os.fspath(trip)])
+                self.assertEqual(code, 1)
+                self.assertIn("error:", err.getvalue())
 
     def test_snapping_uses_whole_frames_and_clip_end(self):
         clips = fixture_clips()

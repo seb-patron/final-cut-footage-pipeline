@@ -32,8 +32,11 @@ A take is the speech between callouts: everything you said since the
 previous keeper, trash or again (or since the clip started), up to the
 callout that ends it. A long silence splits takes too: a pause longer
 than 2 seconds starts a new take, and `--gap` changes that length (see
-below). The callout word itself is always left out of the range: the
-range covers your speech, not the word you said to file it.
+below). When the pause before a keeper, trash or again word is longer
+than the gap, the take ends at that pause and the callout stores
+nothing: there is no take immediately before it. The callout word
+itself is always left out of the range: the range covers your speech,
+not the word you said to file it.
 
 A take that ends at a pause or at the end of the clip, rather than at a
 callout, gets no tag: there was no verdict on it.
@@ -91,7 +94,9 @@ python3 -m fcp_pipeline.callouts --trip <folder> [--gap SECONDS] [--dry-run]
 ```
 
 - `--gap SECONDS` sets the longest pause allowed inside one take
-  (default 2). It must be a number above 0.
+  (default 2). It must be a plain decimal number of seconds above 0
+  (like `2` or `0.5`): fractions such as `1/2`, signs, exponents, and
+  `inf` or `nan` are rejected.
 - `--dry-run` reports what would be tagged and writes nothing: clips
   that would get tags are listed as `would-tag`, and no run is
   recorded.
@@ -106,4 +111,4 @@ Exit codes:
   frame rate do not fail it).
 - `1`: the trip or the catalog could not be read.
 - `2`: the command was used wrongly (the `--trip` folder is required)
-  or `--gap` was not a number above 0.
+  or `--gap` was not a plain decimal number above 0.
